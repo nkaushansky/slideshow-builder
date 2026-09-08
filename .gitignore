@@ -1,0 +1,41 @@
+# Private maintainer material: never committed, never shared
+_private/
+
+# Per-project working data: photos, indexes, derived assets, renders
+project/
+project-*/
+projects/
+**/media/
+**/_removed/
+**/tiles/
+**/clips/
+**/frames/
+**/sheets/
+*.jsonl
+*.mp4
+*.mov
+*.MOV
+*.m4v
+*.jpg
+*.jpeg
+*.JPG
+*.JPEG
+*.heic
+*.HEIC
+*.png
+*.gif
+*.zip
+
+# Model weights are fetched by the setup step, not committed (see curate/models/README.md)
+curate/models/*.onnx
+
+# Toolchains and dependencies
+node_modules/
+tools/
+.venv/
+__pycache__/
+*.pyc
+
+# OS noise
+.DS_Store
+Thumbs.db
