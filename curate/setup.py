@@ -435,13 +435,42 @@ def fetch_ffmpeg_windows() -> None:
 
 # ---------------------------------------------------------------- main
 
+def setup_build(skip: bool) -> None:
+    """Install the build side: Playwright (pinned in build/package.json) and its bundled Chromium."""
+    say("build side")
+    if skip:
+        say("  skipped (--skip-node)")
+        return
+    npm = shutil.which("npm")
+    npx = shutil.which("npx")
+    if not npm or not npx:
+        say("  npm not found; install Node 20 or newer from https://nodejs.org/ and re-run setup")
+        return
+    build = REPO / "build"
+    if (build / "node_modules" / "playwright" / "package.json").is_file():
+        say("  playwright already installed in build/node_modules")
+    else:
+        say("  npm install in build/ (Playwright, pinned)")
+        r = run([npm, "install", "--no-audit", "--no-fund"], cwd=str(build))
+        if r.returncode != 0:
+            say("  ! npm install failed:", (r.stderr or r.stdout or "").strip()[-400:])
+            return
+    say("  playwright install chromium (the browser the render uses; a few hundred MB, cached per user)")
+    r = run([npx, "playwright", "install", "chromium"], cwd=str(build))
+    if r.returncode != 0:
+        say("  ! playwright install chromium failed:", (r.stderr or r.stdout or "").strip()[-400:])
+        say("    the render can still use an installed Google Chrome; see build/README.md")
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="setup", description=__doc__.split("\n\n")[0])
     ap.add_argument("--project", help="project folder with config.toml; enables user-supplied model paths and writes environment.md")
     ap.add_argument("--venv", default=str(REPO / ".venv"), help="virtual environment path (default <repo>/.venv)")
     ap.add_argument("--skip-models", action="store_true", help="do not fetch the default models")
-    ap.add_argument("--fetch-ffmpeg", action="store_true", help="Windows: download a static ffmpeg build into <repo>/tools/ffmpeg/")
-    ap.add_argument("--no-install", action="store_true", help="do not run pip (report only)")
+    ap.add_argument("--fetch-ffmpeg", action="store_true", help="Windows: download a static ffmpeg build into <repo>/tools/ffmpeg/ even if one is on PATH")
+    ap.add_argument("--skip-ffmpeg", action="store_true", help="Windows: do not download ffmpeg when it is missing")
+    ap.add_argument("--skip-node", action="store_true", help="do not run npm install / playwright install in build/")
+    ap.add_argument("--no-install", action="store_true", help="do not run pip, npm or downloads (report only)")
     a = ap.parse_args(argv)
 
     project = Path(a.project).expanduser().resolve() if a.project else None
@@ -452,17 +481,23 @@ def main(argv: list[str]) -> int:
     say("environment")
     py = ensure_venv(Path(a.venv).expanduser().resolve(), install=not a.no_install)
     setup_models(project, a.skip_models)
-    if a.fetch_ffmpeg:
-        say("ffmpeg")
-        fetch_ffmpeg_windows()
+    if WIN and not a.no_install and not a.skip_ffmpeg:
+        have = find_tool("ffmpeg", project) and find_tool("ffprobe", project)
+        if a.fetch_ffmpeg or not have:
+            say("ffmpeg")
+            fetch_ffmpeg_windows()
+    setup_build(skip=a.skip_node or a.no_install)
 
     say("toolchain")
     rows = report(py, project)
     print_table(rows)
     missing = [r[0] for r in rows if r[1] == "MISSING"]
     if WIN and any(t in missing for t in ("ffmpeg", "ffprobe")):
-        say("  ffmpeg is not installed. Re-run with --fetch-ffmpeg to download a static build into tools/ffmpeg/, or install one from")
+        say("  ffmpeg is not installed. Re-run setup without --skip-ffmpeg to download a static build into tools/ffmpeg/, or install one from")
         say("  https://www.gyan.dev/ffmpeg/builds/ or https://github.com/BtbN/FFmpeg-Builds/releases and put it on PATH or in config.toml [tools].")
+    elif any(t in missing for t in ("ffmpeg", "ffprobe")):
+        say("  ffmpeg is not installed. macOS: `brew install ffmpeg`, or a static build from https://evermeet.cx/ffmpeg/ ; Linux: your package manager.")
+        say("  Then put it on PATH or set [tools] ffmpeg and ffprobe in config.toml.")
     if project:
         write_environment(project, rows)
         marks = [m for m in SYNCED_MARKERS if m in str(project).lower()]
@@ -470,6 +505,8 @@ def main(argv: list[str]) -> int:
             say(f"  ! the project folder looks like it is on a synced drive ({', '.join(marks)}); prefer a plain local folder")
     if missing:
         say(f"missing: {', '.join(missing)}")
+    else:
+        say("everything found. Next: open Claude Code in this folder and say \"Let's build a slideshow from my photos\".")
     return 0
 
 

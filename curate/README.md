@@ -5,7 +5,7 @@ The Python side: ingest, index, validate, identify, select, review sheets, hando
 ## Commands
 
 ```
-python curate/setup.py [--project <folder>] [--fetch-ffmpeg] [--skip-models]   once per machine
+python curate/setup.py [--project <folder>] [--skip-models] [--skip-node] [--skip-ffmpeg]   once per machine
 python curate/run.py <stage> [--project <folder>] [--dry-run] [--force] [options]
 python curate/run.py list
 ```
@@ -22,7 +22,7 @@ python curate/run.py list
 
 The project folder is found from `--project`, from `SLIDESHOW_PROJECT`, or by walking up from the current directory to a `config.toml`. `python curate/common.py` prints what a config resolves to. Every stage prints its counts and the accounting line; a stage whose accounting does not balance writes nothing and exits non-zero.
 
-`ffmpeg` and `ffprobe` are needed for videos (duration, codec, HDR, container time, Live Photo pair verification, video thumbnails, first-frame detection). Without them the stages still run, leave the video columns blank, say so loudly, and the validate stage flags every unverified pair; set `[tools] ffmpeg` and `ffprobe` in the config, or run `setup.py --fetch-ffmpeg` on Windows, then re-run `index`.
+`ffmpeg` and `ffprobe` are needed for videos (duration, codec, HDR, container time, Live Photo pair verification, video thumbnails, first-frame detection). Without them the stages still run, leave the video columns blank, say so loudly, and the validate stage flags every unverified pair; on Windows `setup.py` downloads a static build into the repository's `tools/ffmpeg/` when none is found; elsewhere install one and put it on PATH or set `[tools] ffmpeg` and `ffprobe` in the config; then re-run `index`.
 
 ## Layout
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1, 2026-09-08
+
+Onboarding. The README now carries the step-by-step for a semi-technical user: installing Python, Node, Chrome, ffmpeg, VLC and Claude Code (commands checked against the Claude Code documentation), getting the repository with or without Git, running setup, starting Claude Code and what the three checkpoints look like, plus a paragraph to paste into one's own Claude Code so it does the setup itself. `curate/setup.py` now also installs the build side (`npm install` and Playwright's Chromium in `build/`), downloads ffmpeg on Windows whenever none is found (no flag needed; `--skip-ffmpeg` and `--skip-node` opt out), gives macOS and Linux the install hint, and ends with the sentence to say to Claude when everything is found.
+
 ## 0.1.0, 2026-09-08
 
 First shareable version. The whole path ran on Windows against a 50-file sample of a real library: intake answered as a test user, Step 0 through `curate/setup.py` (which fetched a static ffmpeg and the two models), then ingest, index, validate, identify, select, sheets, handoff, `prep`, `build`, an `add-item` round through the ledger, and a 60-second render at 2560x1440, 60 fps, through Playwright's bundled Chromium. The sample covered HEIC, three Live Photo pairs, a 240 fps clip, a 62-second video, a 10-bit HDR clip (synthetic), a GIF, a burst, an exact duplicate, calendar-folder prints and a webp.
