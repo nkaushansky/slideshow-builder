@@ -10,7 +10,7 @@ These run in the `validate` stage, after `index` and before anything is selected
 
 3. **Prefix versus intact metadata.** If the settled date disagrees with the file's own intact EXIF or sidecar time, the row must name a specific witness (the matched file, the method, the distance). "Re-export stamp" or any other unverified story is refused. Flag `prefix-exif-disagree` until a witness is cited.
 
-4. **Live Photo pair validation.** The video half is 1 to 4 seconds long; its container creation time is within ±2 seconds of the still's capture time; its first frame is within about 20 bits of the still's perceptual hash. All three, or flag `pair-unverified` and treat the two files as separate items.
+4. **Live Photo pair validation.** The video half is 1 to 4 seconds long; its container creation time is within ±2 seconds of the still's capture time; the closest of the frames sampled across the clip is within 16 bits of the still on a 64-bit perceptual hash (the still is a key frame from inside the clip, so the first frame alone is not the witness; on real pairs the closest frame sits at 8 to 10 bits, unrelated frames at 22 or more). All three, or flag `pair-unverified` and treat the two files as separate items.
 
 5. **Export title collisions.** When indexing a Takeout, key by member path, not by the title inside the sidecar; an export keeps the original title even when it renames the member with a `(1)` suffix. If two sidecars in one folder share a title, quarantine both from any automatic date or pairing decision. Flag `title-collision`.
 

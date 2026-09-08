@@ -293,13 +293,108 @@ def probe_video(path: str, ffprobe: str, tz: str) -> dict:
     return r
 
 
-def first_frame_phash(path: str, ffmpeg: str) -> str | None:
-    """phash of a video's first frame (for the Live Photo pair gate); None when it cannot be read."""
+def first_frame_png(path: str, ffmpeg: str) -> bytes | None:
+    """A video's first frame as PNG bytes; None when it cannot be read."""
     cmd = [ffmpeg, "-v", "error", "-y", "-i", path, "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"]
     try:
         out = subprocess.run(cmd, capture_output=True, timeout=120)
         if out.returncode != 0 or not out.stdout:
             return None
-        return phash_bytes(out.stdout)
+        return out.stdout
+    except Exception:
+        return None
+
+
+def first_frame_phash(path: str, ffmpeg: str) -> str | None:
+    """phash of a video's first frame; None when it cannot be read."""
+    data = first_frame_png(path, ffmpeg)
+    return phash_bytes(data) if data else None
+
+
+def _center_crop_to_aspect(im, aspect: float):
+    w, h = im.size
+    if w / h > aspect:          # too wide: trim the sides
+        nw = int(round(h * aspect)); x0 = (w - nw) // 2
+        return im.crop((x0, 0, x0 + nw, h))
+    nh = int(round(w / aspect)); y0 = (h - nh) // 2   # too tall: trim top and bottom
+    return im.crop((0, y0, w, y0 + nh))
+
+
+def best_frame_distance(still_path: str, video_path: str, ffmpeg: str, fps: float = 2.0,
+                        max_frames: int = 12) -> tuple[int | None, int, float | None]:
+    """How close a still is to the frames of a short video: (min 64-bit phash distance, frames compared,
+    best 32x32 grayscale correlation). (None, 0, None) when the video cannot be read.
+
+    A Live Photo's still is a key frame from inside its 3-second clip, and the clip is a different
+    encode with motion, so the 256-bit hash used elsewhere is too fine here: on real pairs it sits
+    60-80 bits from the still and unrelated frames sit at 115-125, a thin margin. The 64-bit hash
+    (hash_size 8) puts real pairs at 8-10 bits and unrelated frames at 22-34; the correlation puts
+    real pairs at 0.64-0.82 and unrelated ones under 0.25 (measured on the smoke sample). Frames are
+    sampled at `fps` per second up to `max_frames`, cropped to the still's aspect when they differ.
+    """
+    import tempfile
+    try:
+        with Image.open(still_path) as a:
+            a = ImageOps.exif_transpose(a).convert("RGB")
+            a.thumbnail((1024, 1024))
+            a_aspect = a.width / a.height
+            a_hash = None
+            best, n, best_corr = None, 0, None
+            ga = _gray32(a)
+            with tempfile.TemporaryDirectory() as td:
+                pat = os.path.join(td, "f%03d.png")
+                cmd = [ffmpeg, "-v", "error", "-y", "-i", video_path, "-vf", f"fps={fps}", "-frames:v", str(max_frames), pat]
+                out = subprocess.run(cmd, capture_output=True, timeout=300)
+                if out.returncode != 0:
+                    return None, 0
+                for name in sorted(os.listdir(td)):
+                    with Image.open(os.path.join(td, name)) as b:
+                        b = b.convert("RGB")
+                        b_aspect = b.width / b.height
+                        if abs(a_aspect - b_aspect) > 0.02:
+                            aspect = min(a_aspect, b_aspect)
+                            aa = _center_crop_to_aspect(a, aspect); b = _center_crop_to_aspect(b, aspect)
+                            d = imagehash.phash(aa, hash_size=8) - imagehash.phash(b, hash_size=8)
+                            c = float((_gray32(aa) * _gray32(b)).mean())
+                        else:
+                            if a_hash is None:
+                                a_hash = imagehash.phash(a, hash_size=8)
+                            d = a_hash - imagehash.phash(b, hash_size=8)
+                            c = float((ga * _gray32(b)).mean())
+                        n += 1
+                        d = int(d)
+                        best = d if best is None else min(best, d)
+                        best_corr = c if best_corr is None else max(best_corr, c)
+            return best, n, (round(best_corr, 3) if best_corr is not None else None)
+    except Exception:
+        return None, 0, None
+
+
+def _gray32(im):
+    """Normalized 32x32 grayscale array for a quick correlation between two frames."""
+    import numpy as np
+    g = im.convert("L").resize((32, 32), Image.LANCZOS)
+    a = np.asarray(g, dtype=float)
+    a = a - a.mean()
+    return a / (a.std() or 1.0)
+
+
+def matched_frame_distance(still_path: str, frame_png: bytes) -> int | None:
+    """Hamming distance between a still and a video frame after cropping both to their common aspect.
+
+    A Live Photo's video is 16:9-ish while its still is 4:3, so the full-frame hashes of a true pair
+    differ by 50 to 80 bits of 256 on real files; cropping both to the shared centre region is what
+    makes the comparison mean "same scene". Used only by the pair gate, with the timestamp and
+    duration witnesses.
+    """
+    try:
+        with Image.open(still_path) as a, Image.open(io.BytesIO(frame_png)) as b:
+            a = ImageOps.exif_transpose(a).convert("RGB")
+            b = ImageOps.exif_transpose(b).convert("RGB")
+            aspect = min(a.width / a.height, b.width / b.height)
+            if abs(a.width / a.height - b.width / b.height) > 0.02:
+                a = _center_crop_to_aspect(a, aspect)
+                b = _center_crop_to_aspect(b, aspect)
+            return imagehash.phash(a, hash_size=16) - imagehash.phash(b, hash_size=16)
     except Exception:
         return None

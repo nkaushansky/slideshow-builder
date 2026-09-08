@@ -9,8 +9,8 @@ project's timezone > owner priors only when config [priors] turns them on > noth
 modification time is never used, and no date is ever inherited by filename stem alone.
 
 Joins need a second witness (references/03 gate 1, 4): a Live Photo pair is written only when the
-video is 1-4 s long, its capture time is within 2 s of the still's, and its first frame is within 20
-bits of the still's perceptual hash. Otherwise both halves stay separate items with pair_stem set,
+video is 1-4 s long, its capture time is within 2 s of the still's, and its closest sampled frame is within 16
+bits (of a 64-bit hash) of the still. Otherwise both halves stay separate items with pair_stem set,
 and the validate stage flags them.
 
 Quarantine, never delete: exact duplicates go to work/_duplicates/, burst extras to
@@ -48,7 +48,8 @@ ITEM_COLUMNS = ["media_id", "filename", "original_name", "source_kind", "source_
 LOCATIONS = ["work", "work/_burst-duplicates", "work/_duplicates", "work/_quarantine"]
 PAIR_DUR = (1.0, 4.0)
 PAIR_DT_S = 2.0
-PAIR_FRAME_BITS = 20
+PAIR_FRAME_BITS = 16   # of a 64-bit hash, the closest of the frames sampled across the clip (see
+                       # _probe.best_frame_distance): real pairs measured 8-10 on the smoke sample, unrelated frames 22-34
 BURST_WINDOW_S = 3.0
 BURST_BITS = 12
 DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_")
@@ -361,14 +362,15 @@ def main(argv: list[str]) -> int:
             dt_s = None
         frame_ok = None
         if dur_ok and dt_s is not None and dt_s <= PAIR_DT_S and s["phash"]:
-            ff = vp.get("first_frame_phash")
-            if ff is None and ffmpeg and not dry:
-                ff = _probe.first_frame_phash(v["_path"], ffmpeg) or ""
-                vp["first_frame_phash"] = ff
-                with open(cache_path, "a", encoding="utf-8") as cf:
-                    cf.write(json.dumps(vp) + "\n")
-            if ff:
-                dist = _probe.hash_distance(s["phash"], ff)
+            pf = vp.get("pair_frame") or {}
+            dist = pf.get("dist") if (pf.get("still") == s["media_id"] and "frames" in pf) else None
+            if dist is None and ffmpeg and not dry:
+                dist, n_frames, corr = _probe.best_frame_distance(s["_path"], v["_path"], ffmpeg)
+                if dist is not None:
+                    vp["pair_frame"] = {"still": s["media_id"], "dist": dist, "frames": n_frames, "corr": corr}
+                    with open(cache_path, "a", encoding="utf-8") as cf:
+                        cf.write(json.dumps(vp) + "\n")
+            if dist is not None:
                 s["pair_frame_dist"] = v["pair_frame_dist"] = dist
                 frame_ok = dist <= PAIR_FRAME_BITS
             elif not ffmpeg:
@@ -378,7 +380,8 @@ def main(argv: list[str]) -> int:
             s["type"], v["type"] = "livephoto-still", "livephoto-video"
             v.update(date=s["date"], precision=s["precision"], date_source=s["date_source"],
                      date_witness=f"Live Photo pair with {s['original_name']}: video {vp['dur']:.1f} s, capture times "
-                                  f"{dt_s:.1f} s apart, first frame {s['pair_frame_dist']} bits from the still")
+                                  f"{dt_s:.1f} s apart, closest of {vp['pair_frame'].get('frames', '?')} sampled frames "
+                                  f"{s['pair_frame_dist']} bits (of 64) from the still, correlation {vp['pair_frame'].get('corr', '?')}")
             n_pairs += 1
 
     # ---- bursts among stills: time neighbours or shared normalized stem, phash within 12 bits

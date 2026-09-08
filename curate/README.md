@@ -35,12 +35,11 @@ curate/
   run.py               runs one stage
   heic.py              HEIC/JPEG dimensions and conversion, used by the build side where sips is absent
   stages/              one module per stage, plus _probe.py, _takeout.py, _lenses.py helpers
-  legacy/              the first run's scripts, scrubbed; kept until the smoke test passes, then deleted
   models/              downloaded by setup; see models/README.md for licenses
 ```
 
 ## Status
 
-All seven stages ran end to end on a synthetic project on Windows (ingest through handoff, then the build side's `prep` and `build` on the resulting handoff folder). Not yet exercised: anything that needs ffmpeg, detection quality on real photos (the synthetic fixtures contain no people), the family gate (identity is a later milestone; `[family] gate = "family"` refuses to run until then unless `--allow-presence-gate` is given), and macOS. The Day 3 smoke test on a real sample covers those.
+All seven stages ran end to end on Windows against a 50-file sample of a real library (HEIC, three Live Photo pairs, a 240 fps clip, a 62-second video, a 10-bit HDR clip, a GIF, a burst, an exact duplicate, calendar-folder prints, a webp), followed by the build side's `prep`, `build`, `add-item` and a 60-second render. The Live Photo pair gate was tuned on that sample (see `references/03-validation-gates.md`, gate 4). Not yet exercised: the family gate (identity is a later milestone; `[family] gate = "family"` refuses to run until then unless `--allow-presence-gate` is given), Takeout zips on real data (tested on fabricated zips only), and macOS.
 
-Things the port changed on purpose, beyond the paths: the per-call time budget argument is gone; the calendar-folder and filename-month priors are config, off by default; a date is never inherited from another file by stem alone; the Takeout sidecar lookup keys by member path and quarantines title collisions; the identify stage applies EXIF orientation before detection.
+Things the port changed on purpose from the first run's scripts: the per-call time budget argument is gone; the calendar-folder and filename-month priors are config, off by default; a date is never inherited from another file by stem alone; the Takeout sidecar lookup keys by member path and quarantines title collisions; the identify stage applies EXIF orientation before detection; unsupported extensions are cut with reason `unsupported` instead of reaching the build.

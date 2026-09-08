@@ -32,7 +32,7 @@ One filename per line, the stills that take larger tiles. Identical to the rows 
 
 ## `cut-list.csv`
 
-Every file considered and not kept: `media_id`, `filename`, `location` (which working subfolder holds it), `reason` (one word: `over-cap`, `no-family`, `no-people`, `undated`, `superseded`, `burst`, `duplicate`, `flagged`, `swapped`, `removed`, `redated`), `original_source_path`. The cut list is the pool the review loop draws replacements from, so it must carry enough to find the file again.
+Every file considered and not kept: `media_id`, `filename`, `location` (which working subfolder holds it), `reason` (one word: `over-cap`, `no-family`, `no-people`, `undated`, `unsupported`, `superseded`, `burst`, `duplicate`, `flagged`, `swapped`, `removed`, `redated`), `original_source_path`. The cut list is the pool the review loop draws replacements from, so it must carry enough to find the file again.
 
 ## The accounting invariant
 

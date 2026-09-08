@@ -200,8 +200,17 @@ class Project:
         }
 
     def tool(self, name: str) -> str:
-        """Path to ffmpeg/ffprobe/chrome/vlc from [tools], else the bare name for PATH lookup."""
-        return self.get("tools", name, "") or name
+        """Path to ffmpeg/ffprobe/chrome/vlc: [tools] in the config, else the repository's optional
+        tools/ffmpeg/ folder (where setup.py --fetch-ffmpeg puts a static build), else the bare name
+        for PATH lookup."""
+        configured = self.get("tools", name, "")
+        if configured:
+            return str(Path(configured).expanduser())
+        repo_tools = Path(__file__).resolve().parent.parent / "tools" / "ffmpeg"
+        for cand in (repo_tools / name, repo_tools / f"{name}.exe"):
+            if cand.is_file():
+                return str(cand)
+        return name
 
 
 def load(start: str | os.PathLike | None = None) -> Project:

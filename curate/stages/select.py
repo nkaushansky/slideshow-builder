@@ -112,6 +112,9 @@ def main(argv: list[str]) -> int:
         if lr:
             reason[r["filename"]] = lr  # parked copies may share a media_id with their keeper
             continue
+        if t == "other":
+            reason[mid] = "unsupported"   # an extension no stage can display (webp, avi, ...)
+            continue
         if mid in blocked:
             reason[mid] = "flagged"
             continue
