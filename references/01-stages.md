@@ -2,6 +2,20 @@
 
 Each stage is a command over one project folder. Each is idempotent and resumable: it skips what exists, writes outputs under a temporary name and renames on completion, and prints its counts. Every stage reads the ledger and writes to it; nobody edits the index by hand. If a stage script is missing on the version you have, this file plus `04-selection-lenses.md` and `06-layout-motion-render.md` are enough to implement it.
 
+Commands, as implemented in this repository (Windows, macOS and Linux; run from anywhere with `--project <folder>`, or from inside the project folder):
+
+```
+python curate/setup.py --project <folder>          Step 0: environment, dependencies, models, tool report
+python curate/run.py ingest    [--dry-run]
+python curate/run.py index     [--dry-run]
+python curate/run.py validate  [--list | --resolve <media_id> <gate> --by "<witness>"]
+python curate/run.py identify
+python curate/run.py select    [--lens v1|v2|v3|v4] [--dry-run]
+python curate/run.py sheets    [--with-drops] [--featured] [--alternates <year>] [--replacements <flags.txt>]
+python curate/run.py handoff   [--dry-run]
+build/bin/prep  build/bin/build  build/bin/live  build/bin/apply-replacements <round>  build/bin/render  (.cmd on Windows)
+```
+
 Project folder layout:
 
 ```

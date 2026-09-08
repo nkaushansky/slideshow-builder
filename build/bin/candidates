@@ -1,5 +1,5 @@
 #!/bin/sh
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PATH="$ROOT/tools/node/bin:$PATH"
+export PATH="$ROOT/../tools/node/bin:$PATH"
 exec node "$ROOT/lib/candidates.js" "$@"

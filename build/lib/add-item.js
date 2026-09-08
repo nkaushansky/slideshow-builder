@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 'use strict';
 // bin/add-item — the only sanctioned way to change the set.
-//   copies the file into slideshow-handoff/media/ as <date>_<name>, reads orientation-corrected dimensions and
+//   copies the file into handoff/media/ as <date>_<name>, reads orientation-corrected dimensions and
 //   duration, appends (or replaces) the media.csv row with the right type/precision/featured, updates features.txt,
 //   and runs bin/prep for that one file. A Live Photo is two files with the same stem (still + video).
 // Usage: bin/add-item <file> [<live-photo-companion>] <YYYY-MM-DD|YYYY-MM|YYYY> [--featured] [--replace <filename>] [--tag <tag>] [--dry-run]
 //        bin/add-item --replace <filename> [--dry-run]            a drop: the file leaves, nothing is added
-//   --replace <filename>  take that file (and its Live Photo companion) out of the set: moved to slideshow-handoff/_removed/,
+//   --replace <filename>  take that file (and its Live Photo companion) out of the set: moved to handoff/_removed/,
 //                         rows removed from media.csv and features.txt, a row appended to cut-list.csv (reason: swapped,
 //                         or removed when nothing replaces it)
 //   --reason <word>       cut-list reason for what leaves (default swapped, or removed on a drop); bin/redate uses `redated`
 //   --source <path>       original_source_path for the new row(s), one per input in order (default: the input path)
-//   --year-source <word>  media.csv year_source for the new row(s) (default owner-added)
+//   --date-source <word>  media.csv date_source for the new row(s) (default owner)
+//   --witness <sentence>  media.csv date_witness for the new row(s) (default: added by the owner through add-item)
+//   Every new row carries media_id (SHA-256 of the bytes); rows that lack one are filled in on the way through.
 //   An input that already carries a YYYY-MM-DD_ prefix (a cut-list file) gets the given date in place of it, not on top.
 //   An input that is a cut-list file is promoted: its cut-list.csv row is dropped and its original_source_path carried
 //   over, so media.csv + cut-list.csv keep accounting for every file exactly once.
@@ -26,7 +28,7 @@ const USAGE = 'usage: bin/add-item <file> [<live-photo-companion>] <YYYY-MM-DD|Y
               '       bin/add-item --replace <filename> [--dry-run]   (drop only)';
 function die(msg) { console.error('add-item: ' + msg); process.exit(2); }
 
-const opt = { files: [], date: null, featured: false, replace: null, tag: '', dryRun: false, reason: '', sources: [], yearSource: 'owner-added' };
+const opt = { files: [], date: null, featured: false, replace: null, tag: '', dryRun: false, reason: '', sources: [], dateSource: 'owner', witness: '' };
 {
   const a = process.argv.slice(2);
   for (let i = 0; i < a.length; i++) {
@@ -35,7 +37,8 @@ const opt = { files: [], date: null, featured: false, replace: null, tag: '', dr
     else if (a[i] === '--tag') opt.tag = a[++i] || '';
     else if (a[i] === '--reason') opt.reason = a[++i] || '';          // cut-list reason for the file(s) leaving (default swapped / removed)
     else if (a[i] === '--source') opt.sources.push(a[++i] || '');     // original_source_path per input file, in order (default: the input path)
-    else if (a[i] === '--year-source') opt.yearSource = a[++i] || 'owner-added';
+    else if (a[i] === '--date-source') opt.dateSource = a[++i] || 'owner';
+    else if (a[i] === '--witness') opt.witness = a[++i] || '';
     else if (a[i] === '--dry-run') opt.dryRun = true;
     else if (a[i] === '-h' || a[i] === '--help') { console.log(USAGE); process.exit(0); }
     else if (a[i].startsWith('--')) die('unknown option ' + a[i] + '\n' + USAGE);
@@ -61,12 +64,11 @@ if (!removeOnly) {
   if (mo === '00') { if (da) die('a day without a month (YYYY-00-DD) makes no sense'); mo = undefined; } // so accept that form too
   year = +dm[1];
   const month = mo ? +mo : 0, day = da ? +da : 0;
-  if (year < 2000 || year > 2030) die('implausible year ' + year);
+  if (year < 1990 || year > new Date().getFullYear() + 1) die('implausible year ' + year);
   if (mo && (month < 1 || month > 12)) die('bad month');
   if (da && (day < 1 || day > 31)) die('bad day');
   precision = da ? 'day' : mo ? 'month' : 'year';
   date = `${dm[1]}-${mo || '00'}-${da || '00'}`;
-  if (year < 2012 || year > 2026) console.warn(`add-item: note, ${year} is outside the 2012-2026 range of the show`);
 }
 
 // ---- inspect the inputs
@@ -93,24 +95,9 @@ function isoToCsv(s) {
   return m ? `${m[1]} ${m[2]}` : (s || '');
 }
 async function inspectStill(inp) {
-  let stored, orientation = 1, exifDate = '';
-  if (C.isHeicLike(inp.src)) {
-    stored = await C.sipsDims(inp.src);
-    // sips keeps the EXIF block (orientation, dates) when converting; a tiny JPEG is enough to read it.
-    const tmp = path.join(os.tmpdir(), `add-item-${process.pid}-${inp.stem}.jpg`);
-    const r = await C.run(C.SIPS, ['-Z', '64', '-s', 'format', 'jpeg', inp.src, '--out', tmp]);
-    if (r.code === 0 && fs.existsSync(tmp)) {
-      const info = C.jpegInfo(fs.readFileSync(tmp));
-      if (info) { orientation = info.orientation || 1; exifDate = C.exifDateToCsv(info.dateTimeOriginal); }
-      fs.unlinkSync(tmp);
-    } else console.warn(`add-item: could not read EXIF of ${inp.base}; assuming no rotation`);
-  } else {
-    const info = C.jpegInfo(fs.readFileSync(inp.src));
-    if (info && info.width) { stored = { width: info.width, height: info.height }; orientation = info.orientation || 1; exifDate = C.exifDateToCsv(info.dateTimeOriginal); }
-    else stored = await C.sipsDims(inp.src);
-  }
-  const d = C.displayedDims(stored, orientation);
-  return { width: d.width, height: d.height, orientation, exifDate, duration: null, codec: '', hasAudio: null };
+  // displayed dimensions after EXIF orientation; JPEG in pure JS, HEIC/PNG via sips (macOS) or curate/heic.py
+  const i = await C.imageInfo(inp.src);
+  return { width: i.width, height: i.height, orientation: i.orientation, exifDate: i.dateTimeOriginal, duration: null, codec: '', hasAudio: null };
 }
 async function inspectVideo(inp) {
   const p = await C.probeVideo(inp.src);
@@ -161,7 +148,9 @@ async function inspectVideo(inp) {
   }
 
   // ---- probe
-  for (const inp of inputs) inp.info = inp.cls === 'still' ? await inspectStill(inp) : await inspectVideo(inp);
+  for (const inp of inputs) { inp.info = inp.cls === 'still' ? await inspectStill(inp) : await inspectVideo(inp); inp.mediaId = await C.sha256File(inp.src); }
+  C.ensureMediaIdColumn(header);
+  C.ensureMediaIdColumn(cut.header);
   if (opt.featured && !inputs.some(i => i.cls === 'still')) die('--featured needs a still (features.txt lists stills)');
 
   // ---- build rows
@@ -175,23 +164,26 @@ async function inspectVideo(inp) {
     else if (pairWith.has(inp.newName)) { type = inp.cls === 'still' ? 'livephoto-still' : 'livephoto-video'; companion = pairWith.get(inp.newName).filename; }
     const row = Object.fromEntries(header.map(h => [h, '']));
     Object.assign(row, {
-      filename: inp.newName, type, companion, width: String(i.width), height: String(i.height),
-      duration_s: i.duration != null ? i.duration.toFixed(2) : '', exif_datetime_original: i.exifDate || '',
-      inferred_year: String(year), year_source: opt.yearSource, date, precision, tag: opt.tag || '',
+      media_id: inp.mediaId, filename: inp.newName, type, companion, width: String(i.width), height: String(i.height),
+      duration_s: i.duration != null ? i.duration.toFixed(2) : '', fps: i.avgFps ? i.avgFps.toFixed(2) : '', hdr: i.hdr ? 'yes' : '',
+      exif_datetime_original: i.exifDate || '',
+      date, precision, date_source: opt.dateSource, date_witness: opt.witness || 'added by the owner through add-item', tag: opt.tag || '',
       featured: (opt.featured && inp.cls === 'still') ? 'yes' : '',
       video_codec: inp.cls === 'video' ? (i.codec || '') : '', has_audio: inp.cls === 'video' ? (i.hasAudio ? 'yes' : 'no') : '',
-      crisp_6across_5k: i.width >= 840 ? 'yes' : 'NO', fills_1080p: Math.min(i.width, i.height) >= 1080 ? 'yes' : 'NO',
       original_source_path: inp.cutRow ? inp.cutRow.original_source_path : (opt.sources[inputs.indexOf(inp)] || inp.src),
     });
     newRows.push(row);
-    actions.push(`add    ${inp.newName}  type=${type}${companion ? ' companion=' + companion : ''}  ${i.width}x${i.height}${i.duration != null ? ` ${i.duration.toFixed(2)}s ${i.codec}${i.hdr ? ' HDR' : ''}${i.avgFps >= C.SLOWMO_MIN_FPS ? ` ${Math.round(i.avgFps)}fps->slow-motion` : ''}` : ''}  date=${date}/${precision}${row.featured ? '  FEATURED' : ''}${i.exifDate ? '  exif=' + i.exifDate : ''}${inp.cutRow ? `  from cut-list (${inp.cutRow.reason}): ${inp.cutRow.original_source_path}` : ''}`);
+    // changes.log line, in the contract's format (references/02):
+    //   add     <filename>  type=<type> [companion=<name>]  <w>x<h> [<dur>s <codec>]  date=<date>/<precision>  [exif=<raw>]  [from cut-list (<reason>): <source path>]
+    actions.push(`${'add'.padEnd(8)}${inp.newName}  type=${type}${companion ? ' companion=' + companion : ''}  ${i.width}x${i.height}${i.duration != null ? ` ${i.duration.toFixed(2)}s ${i.codec}` : ''}  date=${date}/${precision}${i.exifDate ? '  exif=' + i.exifDate : ''}${inp.cutRow ? `  from cut-list (${inp.cutRow.reason}): ${inp.cutRow.original_source_path}` : ''}`);
+    if (row.featured || i.hdr || (i.avgFps >= C.SLOWMO_MIN_FPS)) console.log(`  note: ${inp.newName}${row.featured ? ' featured' : ''}${i.hdr ? ' HDR' : ''}${i.avgFps >= C.SLOWMO_MIN_FPS ? ` ${Math.round(i.avgFps)} fps slow-motion` : ''}`);
   }
-  for (const r of promoted) actions.push(`cut    ${r.filename} leaves cut-list.csv (now in the set)`);
+  for (const r of promoted) actions.push(`${'cut'.padEnd(8)}${r.filename}  leaves cut-list.csv (now in the set)`);
   for (const [newName, other] of pairWith) {
-    actions.push(`pair   ${other.filename} becomes ${other.type === 'still' ? 'livephoto-still' : 'livephoto-video'} with companion ${newName}`);
+    actions.push(`${'pair'.padEnd(8)}${other.filename}  becomes ${other.type === 'still' ? 'livephoto-still' : 'livephoto-video'} with companion ${newName}`);
   }
   const cutReason = opt.reason || (removeOnly ? 'removed' : 'swapped');
-  for (const r of removed) actions.push(`remove ${r.filename}  -> slideshow-handoff/_removed/, ${cutReason === 'redated' ? 'redated (no cut-list row)' : 'cut-list.csv reason=' + cutReason}${feats.names.includes(r.filename) ? ', dropped from features.txt' : ''}`);
+  for (const r of removed) actions.push(`${'remove'.padEnd(8)}${r.filename}  -> handoff/_removed/, cut-list.csv reason=${cutReason}${feats.names.includes(r.filename) ? ', dropped from features.txt' : ''}`);
 
   console.log((opt.dryRun ? 'DRY RUN — would do:\n' : 'Plan:\n') + actions.map(a => '  ' + a).join('\n'));
   if (opt.dryRun) return;
@@ -206,8 +198,10 @@ async function inspectVideo(inp) {
   }
   for (const inp of inputs) fs.copyFileSync(inp.src, path.join(C.MEDIA, inp.newName), fs.constants.COPYFILE_EXCL);
 
-  // media.csv
+  // media.csv (rows without a media_id yet are hashed from media/ on the way through)
   let out = rows.filter(r => !removedNames.has(r.filename));
+  const filled = await C.ensureMediaIds(header, out, r => path.join(C.MEDIA, r.filename));
+  if (filled) console.log(`media.csv: filled media_id on ${filled} row(s) that lacked one`);
   for (const [newName, other] of pairWith) {
     other.type = other.type === 'still' ? 'livephoto-still' : 'livephoto-video';
     other.companion = newName;
@@ -232,9 +226,12 @@ async function inspectVideo(inp) {
     cut.rows = cut.rows.filter(r => !promoted.includes(r));
     for (const r of leaving) {
       const row = Object.fromEntries(cut.header.map(h => [h, '']));
-      Object.assign(row, { filename: r.filename, location: '_removed', reason: cutReason, original_source_path: r.original_source_path || '' });
+      const removedFile = path.join(removedDir, r.filename);
+      const id = r.media_id || (fs.existsSync(removedFile) ? await C.sha256File(removedFile) : '');
+      Object.assign(row, { media_id: id, filename: r.filename, location: '_removed', reason: cutReason, original_source_path: r.original_source_path || '' });
       cut.rows.push(row);
     }
+    await C.ensureMediaIds(cut.header, cut.rows, r => (r.location === '_removed' ? path.join(removedDir, r.filename) : null));
     C.writeCsvObjects(C.CUT_LIST_CSV, cut.header, cut.rows, cut.eol);
   }
 
@@ -251,7 +248,7 @@ async function inspectVideo(inp) {
     for (const inp of inputs) prepArgs.push('--only', inp.newName);
     console.log('Running prep for the new file(s)...');
     const res = spawnSync(process.execPath, prepArgs, { stdio: 'inherit' });
-    if (res.status !== 0) { console.error('add-item: prep reported a problem (see build/prep-report.txt). The set was changed; fix and re-run bin/prep.'); process.exit(1); }
+    if (res.status !== 0) { console.error(`add-item: prep reported a problem (see ${C.rel(path.join(C.BUILD, 'prep-report.txt'))}). The set was changed; fix and re-run bin/prep.`); process.exit(1); }
   }
   console.log('Next: bin/build, then look at it in the live player.');
 })().catch(e => { console.error('add-item: ' + (e.stack || e)); process.exit(1); });

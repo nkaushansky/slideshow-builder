@@ -1,7 +1,13 @@
 #!/bin/sh
-# Writes build/review.html (the sequence with names) and opens it in Chrome.
+# Writes <project>/build/review.html (the sequence with names) and opens it in Chrome.
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PATH="$ROOT/tools/node/bin:$PATH"
-node "$ROOT/lib/review.js"
-open -a "Google Chrome" "file://$ROOT/build/review.html"
+export PATH="$ROOT/../tools/node/bin:$PATH"
+node "$ROOT/lib/review.js" "$@"
+BUILD="$(node "$ROOT/lib/common.js" --print build "$@")"
+URL="file://$BUILD/review.html"
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+if [ -x "$CHROME" ]; then "$CHROME" "$URL" >/dev/null 2>&1 &
+elif command -v google-chrome >/dev/null 2>&1; then google-chrome "$URL" >/dev/null 2>&1 &
+elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$URL"
+else open -a "Google Chrome" "$URL"; fi

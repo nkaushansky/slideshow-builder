@@ -1,8 +1,8 @@
 #!/bin/sh
-# Thin wrapper: puts the project-local toolchain on PATH and runs lib/build.js
+# Thin wrapper: puts the optional local toolchain (<repo>/tools) on PATH and runs lib/build.js
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PATH="$ROOT/tools/node/bin:$ROOT/tools/ffmpeg:$PATH"
+export PATH="$ROOT/../tools/node/bin:$ROOT/../tools/ffmpeg:$PATH"
 # caffeinate -i keeps the Mac from idle-sleeping while this runs (it sleeps after 1 idle minute otherwise)
 if command -v caffeinate >/dev/null 2>&1; then exec caffeinate -i node "$ROOT/lib/build.js" "$@"; fi
 exec node "$ROOT/lib/build.js" "$@"

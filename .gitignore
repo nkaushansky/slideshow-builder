@@ -42,3 +42,7 @@ Thumbs.db
 
 # Per-project playback overrides carry photo filenames; only the example template ships
 build/overrides.json
+
+# Written by curate/setup.py on each machine
+curate/models/manifest.json
+curate/models/*.pt

@@ -43,13 +43,14 @@ function writeReview() {
     for (const e of r.items) {
       const it = m.items[e.item];
       let media;
-      if (it.kind === 'still') media = `<img loading="lazy" src="${esc(path.relative(C.BUILD, path.join(C.ROOT, it.src)))}">`;
+      // review.html lives in build/ next to player.html, so the manifest's build-relative paths are used as they are
+      if (it.kind === 'still') media = `<img loading="lazy" src="${esc(it.src)}">`;
       else {
         // a mid-clip frame when the frame sequence for this row height exists, else the clip itself (Chrome shows its first frame)
-        const dir = path.join(C.ROOT, e.frameDir);
+        const dir = path.join(C.BUILD, e.frameDir);
         const mid = String(Math.max(1, Math.min(e.frameCount, Math.round(e.frameCount / 2)))).padStart(4, '0') + '.jpg';
-        if (fs.existsSync(path.join(dir, mid))) media = `<img loading="lazy" src="${esc(path.relative(C.BUILD, path.join(dir, mid)))}">`;
-        else media = `<video muted playsinline preload="metadata" src="${esc(path.relative(C.BUILD, path.join(C.ROOT, it.src)))}#t=0.5"></video>`;
+        if (fs.existsSync(path.join(dir, mid))) media = `<img loading="lazy" src="${esc(e.frameDir + '/' + mid)}">`;
+        else media = `<video muted playsinline preload="metadata" src="${esc(it.src)}#t=0.5"></video>`;
       }
       parts.push(`<div class="tile kind-${it.kind}">${media}<div class="name">${it.featured ? '<span class="star">★</span> ' : ''}${esc(it.id)}</div><div class="info">${esc(it.date)} · ${it.kind}${it.kind !== 'still' ? ` · ${it.duration.toFixed(1)}s` : ''}${it.slow && it.slow !== 1 ? ' · slow-mo' : ''}${it.hdr ? ' · hdr' : ''}</div></div>`);
     }
@@ -59,5 +60,5 @@ function writeReview() {
   fs.writeFileSync(out, parts.join('\n'));
   return out;
 }
-if (require.main === module) { const out = writeReview(); console.log('wrote ' + path.relative(C.ROOT, out) + ' — open it in Chrome'); }
+if (require.main === module) { const out = writeReview(); console.log('wrote ' + C.rel(out) + ' — open it in Chrome'); }
 module.exports = { writeReview };

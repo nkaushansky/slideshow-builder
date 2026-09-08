@@ -2,5 +2,5 @@
 # bin/redate <filename> <date> [--dry-run] — move one item (and its Live Photo companion) to a new date via add-item
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PATH="$ROOT/tools/node/bin:$ROOT/tools/ffmpeg:$PATH"
+export PATH="$ROOT/../tools/node/bin:$ROOT/../tools/ffmpeg:$PATH"
 exec node "$ROOT/lib/redate.js" "$@"

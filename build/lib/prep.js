@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// bin/prep — derive display assets from slideshow-handoff/media into build/. Never touches media/.
+// bin/prep — derive display assets from handoff/media into the project's build/. Never touches media/.
 //   build/tiles/<stem>.jpg      plain stills (Live Photo stills are never shown), JPEG q90, display height <= 1640
 //   build/clips/<stem>.mp4      Live Photo .MP4 halves, standalone videos, GIFs -> H.264 muted, display height <= 1640
 //   build/prep-manifest.json    per-file facts that build/render rely on (clip durations, slow-motion, HDR, dims)
@@ -107,7 +107,8 @@ async function makeTile(r) {
   const t = Date.now();
   let rotated = false;
   try {
-    const stored = await C.sipsDims(src);
+    const info = await C.imageInfo(src);
+    const stored = { width: info.storedWidth, height: info.storedHeight };
     if (stored.width === W && stored.height === H) rotated = false;
     else if (stored.width === H && stored.height === W) rotated = true;
     else warn(`${r.filename}: stored ${stored.width}x${stored.height} is neither media.csv ${W}x${H} nor its transpose`);
@@ -118,12 +119,9 @@ async function makeTile(r) {
   if (!needResize && isJpeg) {
     fs.copyFileSync(src, tmp);
   } else {
-    const a = ['-s', 'format', 'jpeg', '-s', 'formatOptions', '90'];
-    // sips resamples the STORED image: for a stored-rotated file the displayed height is the stored width.
-    if (needResize) a.push(rotated ? '--resampleWidth' : '--resampleHeight', String(C.MAX_TILE_H));
-    a.push(src, '--out', tmp);
-    const res = await C.run(C.SIPS, a);
-    if (res.code !== 0 || !exists(tmp)) { rm(tmp); return { status: 'failed', error: (res.err || res.out).trim().split('\n').pop() }; }
+    try { await C.makeJpeg(src, tmp, { maxHeight: needResize ? C.MAX_TILE_H : 0, quality: 90, storedRotated: rotated }); }
+    catch (e) { rm(tmp); return { status: 'failed', error: e.message }; }
+    if (!exists(tmp)) { rm(tmp); return { status: 'failed', error: 'converter wrote nothing' }; }
   }
   fs.renameSync(tmp, out);
   return { status: 'done', ms: Date.now() - t, rotated, resized: needResize };
@@ -204,7 +202,7 @@ async function main() {
   // ---- tiles
   if (opt.tiles && !opt.verifyOnly) {
     const todo = pick(stills);
-    say(`Tiles: ${todo.length} stills, ${JOBS} at a time -> ${path.relative(C.ROOT, C.TILES)}`);
+    say(`Tiles: ${todo.length} stills, ${JOBS} at a time -> ${C.rel(C.TILES)}`);
     let n = 0;
     const results = await C.pool(todo, JOBS, async r => {
       const res = await makeTile(r);
@@ -244,7 +242,7 @@ async function main() {
     const work = r => { const p = probes.get(r.filename); return p.duration * Math.min(p.avgFps, 60) * (+r.width) * (+r.height) * (p.hdr ? 3 : 1); };
     todo.sort((a, b) => work(b) - work(a));
     const lanes = Math.max(1, Math.floor(JOBS / 2));
-    say(`Clips: ${todo.length} to encode, ${lanes} at a time -> ${path.relative(C.ROOT, C.CLIPS)}`);
+    say(`Clips: ${todo.length} to encode, ${lanes} at a time -> ${C.rel(C.CLIPS)}`);
     let n = 0;
     const results = await C.pool(todo, lanes, async r => {
       const res = await makeClip(r, probes.get(r.filename), realtime.has(r.filename));
@@ -267,7 +265,7 @@ async function main() {
     if (v.error === 'missing') { tileMissing++; continue; }
     if (!v.ok) { tileBad++; warn(`tile ${r.filename}: ${v.error}`); }
     else tileOk++;
-    manifest.tiles[r.filename] = { path: path.relative(C.ROOT, C.tilePath(r.filename)), width: v.width, height: v.height, storedRotated: v.storedRotated, ok: v.ok };
+    manifest.tiles[r.filename] = { path: C.webRel(C.BUILD, C.tilePath(r.filename)), width: v.width, height: v.height, storedRotated: v.storedRotated, ok: v.ok };
   }
   let clipOk = 0, clipBad = 0, clipMissing = 0;
   await C.pool(clips.filter(r => probes.has(r.filename)), 4, async r => {
@@ -276,7 +274,7 @@ async function main() {
     if (v.error === 'missing') { clipMissing++; return; }
     if (!v.ok) { clipBad++; warn(`clip ${r.filename}: ${v.error}`); } else clipOk++;
     manifest.clips[r.filename] = {
-      path: path.relative(C.ROOT, C.clipPath(r.filename)), width: v.width, height: v.height, duration: v.duration, fps: v.fps,
+      path: C.webRel(C.BUILD, C.clipPath(r.filename)), width: v.width, height: v.height, duration: v.duration, fps: v.fps,
       slow: v.plan.slow, hdr: p.hdr, sourceDuration: p.duration, sourceFps: p.avgFps, sourceFrames: p.nbFrames, sourceCodec: p.codec,
       sourceWidth: p.width, sourceHeight: p.height, ok: v.ok,
     };
@@ -292,7 +290,7 @@ async function main() {
 function finish(t0, manifest) {
   const lines = [`prep report ${new Date().toISOString()} (${C.fmtSecs(Date.now() - t0)})`, ...report];
   fs.writeFileSync(path.join(C.BUILD, 'prep-report.txt'), lines.join('\n') + '\n');
-  say(`Done in ${C.fmtSecs(Date.now() - t0)}. Report: ${path.relative(C.ROOT, path.join(C.BUILD, 'prep-report.txt'))}` + (manifest ? `, manifest: ${path.relative(C.ROOT, C.PREP_MANIFEST)}` : ''));
+  say(`Done in ${C.fmtSecs(Date.now() - t0)}. Report: ${C.rel(path.join(C.BUILD, 'prep-report.txt'))}` + (manifest ? `, manifest: ${C.rel(C.PREP_MANIFEST)}` : ''));
   const bad = report.filter(l => /^(WARN|ERROR|FAILED)/.test(l));
   if (bad.length) say(`${bad.length} warning/error line(s) in the report.`);
   if (logStream) logStream.end();

@@ -2,7 +2,7 @@
 # Deterministic mp4 render. Needs Google Chrome; run from a normal Terminal (not inside a sandbox).
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PATH="$ROOT/tools/node/bin:$ROOT/tools/ffmpeg:$PATH"
+export PATH="$ROOT/../tools/node/bin:$ROOT/../tools/ffmpeg:$PATH"
 export NODE_PATH="$ROOT/node_modules"
 if command -v caffeinate >/dev/null 2>&1; then exec caffeinate -dis node "$ROOT/lib/render.js" "$@"; fi
 exec node "$ROOT/lib/render.js" "$@"

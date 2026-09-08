@@ -7,6 +7,7 @@
 //   4. per frame: page updates to t = k/60, draws the visible tiles into a canvas, JPEG-encodes it (q 0.95) and sends it over
 //      a WebSocket; we pipe it into ffmpeg (image2pipe -> libx264) and ack once ffmpeg accepted it (backpressure)
 //   5. verify: frame count, size, fps, no audio; wrap check = PSNR between frame 0 and the frame after the last one
+// Chromium: Playwright's bundled build first, installed Google Chrome as the fallback (common.launchBrowser).
 // Usage: bin/render [--seconds N] [--from SECONDS] [--out FILE] [--preset slow|medium|...] [--crf N] [--q 0.95] [--skip-frames] [--x3] [--warm-loops N]
 //   default renders exactly one loop to build/slideshow.mp4; --seconds 60 is the quick test render; --from 470 --seconds 40
 //   renders a window from inside the loop (the scheduler is stepped up to that point without drawing, so the state is right).
@@ -90,8 +91,8 @@ async function main() {
   const total = opt.seconds ? Math.round(opt.seconds * fps) : manifest.loop.frames;
   const k0 = Math.round(opt.from * fps);
   const out = path.resolve(opt.out || path.join(C.BUILD, opt.seconds ? `test-${opt.from ? opt.from + 's-' : ''}${opt.seconds}s.mp4` : 'slideshow.mp4'));
-  log(`render: ${total} frames at ${fps} fps (${fmtTime(total / fps)})${k0 ? ` from frame ${k0} (t=${fmtTime(k0 / fps)})` : ''} -> ${path.relative(C.ROOT, out)}; loop ${manifest.loop.frames} frames = ${fmtTime(manifest.loop.seconds)} at ${manifest.loop.speed.toFixed(3)} px/s; x264 ${opt.preset} crf ${opt.crf}, jpeg q ${opt.q}`);
-  if (!fs.existsSync(path.join(C.ROOT, 'player.html'))) throw new Error('player.html missing; run bin/build');
+  log(`render: ${total} frames at ${fps} fps (${fmtTime(total / fps)})${k0 ? ` from frame ${k0} (t=${fmtTime(k0 / fps)})` : ''} -> ${C.rel(out)}; loop ${manifest.loop.frames} frames = ${fmtTime(manifest.loop.seconds)} at ${manifest.loop.speed.toFixed(3)} px/s; x264 ${opt.preset} crf ${opt.crf}, jpeg q ${opt.q}`);
+  if (!fs.existsSync(path.join(C.BUILD, 'player.html'))) throw new Error('player.html missing; run bin/build');
 
   // 1. frames
   if (!opt.skipFrames) {
@@ -107,8 +108,8 @@ async function main() {
   let ffmpeg = null, frameSock = null, received = 0, bytes = 0, ffmpegErr = '', ffmpegDone = null;
   let firstJpeg = null, lastJpeg = null, wrapJpeg = null, capturing = true;
   const server = http.createServer((req, res) => {
-    const p = path.join(C.ROOT, decodeURIComponent(new URL(req.url, 'http://x').pathname));
-    if (!p.startsWith(C.ROOT) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { res.writeHead(404); return res.end(); }
+    const p = path.join(C.BUILD, decodeURIComponent(new URL(req.url, 'http://x').pathname));
+    if (!p.startsWith(C.BUILD) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { res.writeHead(404); return res.end(); }
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(p).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     fs.createReadStream(p).pipe(res);
   });
@@ -141,15 +142,14 @@ async function main() {
   ffmpeg.stdin.on('error', e => log('ffmpeg stdin error: ' + e.message));
 
   // 4. browser
-  const { chromium } = require('playwright');
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await C.launchBrowser(log);
   const ctx = await browser.newContext({ viewport: { width: manifest.config.viewportW, height: manifest.config.viewportH }, deviceScaleFactor: 1 });
   const page = await ctx.newPage();
   page.on('pageerror', e => log('page error: ' + e.message));
   await page.goto(`${base}/player.html?render=1&q=${opt.q}`);
   await page.evaluate(() => window.__ready);
   const info = await page.evaluate(() => window.__renderInfo());
-  if (info.loop.frames !== manifest.loop.frames) throw new Error('player.html is out of date with build/manifest.json; run bin/build');
+  if (info.loop.frames !== manifest.loop.frames) throw new Error('player.html is out of date with manifest.json; run bin/build');
   await page.evaluate(u => window.__renderConnect(u), base.replace('http', 'ws') + '/frames');
   // warm up through whole loops so frame 0 carries the periodic scheduler state and the wrap is seamless; the page
   // reports whether the state repeated from one loop to the next (a few seconds per loop, no drawing)
@@ -213,7 +213,7 @@ async function main() {
     fs.writeFileSync(list, Array(3).fill(`file '${out.replace(/'/g, "'\\''")}'`).join('\n') + '\n');
     const x3 = out.replace(/\.mp4$/, '-x3.mp4');
     const r = await C.run(C.FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', x3]);
-    if (r.code !== 0) problems.push('concat failed: ' + r.err.trim()); else log(`x3: ${path.relative(C.ROOT, x3)} (${(fs.statSync(x3).size / 1e6).toFixed(1)} MB)`);
+    if (r.code !== 0) problems.push('concat failed: ' + r.err.trim()); else log(`x3: ${C.rel(x3)} (${(fs.statSync(x3).size / 1e6).toFixed(1)} MB)`);
   }
   fs.writeFileSync(path.join(C.BUILD, 'render-log.txt'), logLines.join('\n') + '\n');
   if (problems.length) { log('PROBLEMS:'); for (const p of problems) log('  X ' + p); process.exit(1); }

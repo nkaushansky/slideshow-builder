@@ -14,7 +14,7 @@ It was built for one family's milestone celebration and run once, start to finis
 
 ## Quick start
 
-1. Clone this repository and open Claude Code inside the folder.
+1. Clone this repository, run `python curate/setup.py` once (it creates a virtual environment, installs the pinned dependencies, fetches the detection models, and reports which tools are missing), then open Claude Code inside the folder.
 2. Say: `Let's build a slideshow from my photos.`
 3. Answer the intake questions. The skill asks everything it needs in one go: where the photos are, what machine builds and what machine displays, the event and the room, who the show is about, the scope, and a few taste questions with sensible defaults.
 4. Let it run. You will be asked to look at things three times: the contact sheets of the proposed cut, one round in the live player, and the final video once, all the way through.

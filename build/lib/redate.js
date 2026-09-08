@@ -28,7 +28,7 @@ if (group.every(r => r.date === date.replace(/^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?
 // stage copies under their bare names; add-item puts the new date prefix on
 const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'redate-'));
 const staged = group.map(r => { const p = path.join(stage, r.filename.replace(/^\d{4}-\d{2}-\d{2}_/, '')); fs.copyFileSync(path.join(C.MEDIA, r.filename), p); return p; });
-const cmd = [path.join(__dirname, 'add-item.js'), ...staged, date, '--replace', name, '--reason', 'redated', '--year-source', 'owner-redated'];
+const cmd = [path.join(__dirname, 'add-item.js'), ...staged, date, '--replace', name, '--reason', 'redated', '--date-source', 'owner', '--witness', `redated by the owner; was ${row.date} (${row.precision})`];
 for (const r of group) cmd.push('--source', r.original_source_path || path.join(C.MEDIA, r.filename));
 if (group.some(r => r.featured === 'yes')) cmd.push('--featured');
 const tag = group.map(r => r.tag).find(Boolean); if (tag) cmd.push('--tag', tag);

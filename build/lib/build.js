@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 // bin/build — media.csv + build/prep-manifest.json -> items -> date keys -> chapters -> spacing -> justified rows
-//   -> build/manifest.json, build/sequence.txt, player.html (player.template.html with the manifest inlined).
+//   -> <project>/build/manifest.json, sequence.txt, player.html (player.template.html with the manifest inlined).
+// Asset paths inside the manifest are relative to the project's build/ folder, where player.html lives.
 // Deterministic: no randomness is used (CONFIG.seed is reserved). Prints row counts, feature share and the acceptance checks.
 // Usage: bin/build [--speed N] [--quiet]
 
@@ -39,9 +40,10 @@ const CONFIG = {
   frameFps: 30,            // render-mode frame sequences
   renderFps: 60,
 };
-const OVERRIDES_FILE = path.join(__dirname, '..', 'overrides.json');
+// per-item playback overrides: <project>/overrides.json when it exists, else the repo's build/overrides.json (see overrides.example.json)
+const OVERRIDES_FILE = [C.PROJECT && path.join(C.PROJECT, 'overrides.json'), path.join(__dirname, '..', 'overrides.json')].filter(Boolean).find(p => fs.existsSync(p)) || path.join(__dirname, '..', 'overrides.json');
 const TEMPLATE = path.join(__dirname, '..', 'player.template.html');
-const PLAYER_OUT = path.join(C.ROOT, 'player.html');
+const PLAYER_OUT = path.join(C.BUILD, 'player.html');
 
 const opt = { quiet: false };
 {
@@ -84,7 +86,7 @@ function loadItems() {
     const duration = kind === 'still' ? 0 : (m ? m.duration : +r.duration_s);
     items.push({
       id: r.filename, stem: C.stemOf(r.filename), kind, w, h, aspect: w / h,
-      src: m ? m.path : path.relative(C.ROOT, kind === 'still' ? C.tilePath(r.filename) : C.clipPath(r.filename)),
+      src: m ? m.path : C.webRel(C.BUILD, kind === 'still' ? C.tilePath(r.filename) : C.clipPath(r.filename)),
       featured: !!featured, anchor: !!featured || kind === 'video', moving: kind !== 'still',
       wide: w / h > CONFIG.wideAloneRatio,
       duration, start: +o.start || 0, trimStart: +o.trimStart || 0, trimEnd: +o.trimEnd || 0,
@@ -546,7 +548,7 @@ function main() {
         const e = { item: itemIndex.get(it.id), x: p.x, w: p.w };
         if (it.moving) {
           const visible = (CONFIG.viewportH + r.h) / speed;     // seconds the row is on screen
-          e.frameDir = path.posix.join('build', 'frames', it.stem, 'h' + r.h);
+          e.frameDir = path.posix.join('frames', it.stem, 'h' + r.h);
           if (it.kind === 'video') { e.frameFrom = it.start; e.frameTo = Math.min(it.duration, it.start + visible + 1); }
           else { e.frameFrom = it.trimStart; e.frameTo = Math.max(it.trimStart + 0.1, it.duration - it.trimEnd); }
           e.frameCount = Math.max(1, Math.round((e.frameTo - e.frameFrom) * CONFIG.frameFps));
@@ -585,11 +587,9 @@ function main() {
       const inlined = tpl.replace('/*__MANIFEST__*/', 'const MANIFEST = ' + JSON.stringify(manifest) + ';');
       fs.writeFileSync(PLAYER_OUT, inlined);
       // review copy: same player with flagging forced on, because macOS `open` strips ?review=1 from file:// URLs.
-      // It lives in build/, so its relative asset paths need one more level.
-      const reviewPage = inlined.replace('const MANIFEST = ', 'window.__FORCE_REVIEW = true; const MANIFEST = ')
-        .replace(/"src":"build\//g, '"src":"').replace(/"frameDir":"build\//g, '"frameDir":"');
+      const reviewPage = inlined.replace('const MANIFEST = ', 'window.__FORCE_REVIEW = true; const MANIFEST = ');
       fs.writeFileSync(path.join(C.BUILD, 'player-review.html'), reviewPage);
-      playerNote = `player.html written (${(fs.statSync(PLAYER_OUT).size / 1024).toFixed(0)} KB), build/player-review.html too`;
+      playerNote = `player.html written (${(fs.statSync(PLAYER_OUT).size / 1024).toFixed(0)} KB), player-review.html too`;
     }
   }
 
@@ -606,7 +606,7 @@ function main() {
     jumps.sort((a, b) => b.back - a.back);
     say(`       backward date jumps inside chapters: ${jumps.filter(j => j.back > 1.5).length} over 1.5 yr, ${jumps.length} over 1 yr${jumps.length ? ' (largest: ' + jumps.slice(0, 3).map(j => j.s).join('; ') + ')' : ''}`);
   }
-  say(`       ${playerNote}; build/manifest.json, build/sequence.txt written (${C.fmtSecs(Date.now() - t0)})`);
+  say(`       ${playerNote}; manifest.json, sequence.txt written to ${C.rel(C.BUILD)} (${C.fmtSecs(Date.now() - t0)})`);
   const shown = warnings.filter(w => !/no prep output yet/.test(w));
   const missingPrep = warnings.length - shown.length;
   for (const w of shown.slice(0, 12)) say('  ! ' + w);

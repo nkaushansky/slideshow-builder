@@ -16,7 +16,7 @@ async function generateFrames(opts = {}) {
   const say = s => { if (!opts.quiet) console.log(s); };
   const manifest = JSON.parse(fs.readFileSync(path.join(C.BUILD, 'manifest.json'), 'utf8'));
   const prep = C.readPrepManifest();
-  if (!prep) throw new Error('build/prep-manifest.json missing; run bin/prep first');
+  if (!prep) throw new Error('prep-manifest.json missing; run bin/prep first');
   const tasks = [];
   for (const row of manifest.rows) {
     for (const e of row.items) {
@@ -24,7 +24,7 @@ async function generateFrames(opts = {}) {
       const it = manifest.items[e.item];
       const clip = prep.clips[it.id];
       if (!clip) { console.warn(`frames: ${it.id} has no prep clip entry`); continue; }
-      tasks.push({ it, e, row, clip, dir: path.join(C.ROOT, e.frameDir) });
+      tasks.push({ it, e, row, clip, dir: path.join(C.BUILD, e.frameDir) });
     }
   }
   const results = { made: 0, skipped: 0, failed: 0, frames: 0, failures: [], padded: [] };

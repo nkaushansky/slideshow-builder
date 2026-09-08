@@ -1,36 +1,46 @@
 # curate
 
-The Python side: ingest, index, validate, identify, select, review sheets, handoff, apply, reconcile. Each stage is a command over the project folder described in `references/01-stages.md`, reads `project/config.toml`, and refuses to run without it.
+The Python side: ingest, index, validate, identify, select, review sheets, handoff. Each stage is a command over the project folder described in `references/01-stages.md`, reads `project/config.toml`, and refuses to run without it.
 
-## Status
+## Commands
 
-The first run's scripts are in `legacy/`, scrubbed of anything personal but not yet runnable: their paths are placeholders (`~/photo-project`, `~/slideshow-work`) and their `PORT:` comments mark the constants that must come from the config. The port moves each one under `stages/`, wired to `common.py`, and deletes the legacy copy once the smoke test passes. Until a stage exists as a command, Claude implements it from the references before continuing, and records that in the project brief's changelog.
+```
+python curate/setup.py [--project <folder>] [--fetch-ffmpeg] [--skip-models]   once per machine
+python curate/run.py <stage> [--project <folder>] [--dry-run] [--force] [options]
+python curate/run.py list
+```
 
-`common.py` is done: it finds the project folder (`--project`, `SLIDESHOW_PROJECT`, or a `config.toml` above the current directory), loads and checks the config, and provides the paths, the per-year caps pro-rated by month, the age labels for sheets, the anchors, pins and priors, plus `media_id` (SHA-256), atomic writes and the date-prefix rule. Run `python common.py` inside a project to see what the config resolves to.
+| Stage | Reads | Writes | Options |
+|---|---|---|---|
+| `ingest` | the `[[sources]]` in the config | `work/`, `index/ingest.csv`, `index/takeout-sidecars.csv` | `--workers N` |
+| `index` | `work/`, the sidecar index | `index/items.csv`, `index/_probe-cache.jsonl`; renames working copies with the date prefix; parks bursts and duplicates | |
+| `validate` | `items.csv`, sidecars | `index/flags.csv` | `--list`, `--resolve <media_id> <gate> --by "<witness>"` |
+| `identify` | `items.csv`, the models | `index/people.csv` | `--all` (include parked files), `--limit N` |
+| `select` | `items.csv`, `people.csv`, `flags.csv`, the config | `index/selection.csv`, `index/cut-list.csv` | `--lens v1..v4`, `--include-undated`, `--allow-presence-gate` |
+| `sheets` | the above | `index/sheets/*.jpg`, `index/sheets/index.md` | `--with-drops`, `--featured`, `--alternates <year>`, `--replacements <flags.txt>` |
+| `handoff` | the above | `handoff/media/`, `media.csv`, `features.txt`, `cut-list.csv`, `inventory.md`, `HANDOFF.md`, `changes.log` | |
+
+The project folder is found from `--project`, from `SLIDESHOW_PROJECT`, or by walking up from the current directory to a `config.toml`. `python curate/common.py` prints what a config resolves to. Every stage prints its counts and the accounting line; a stage whose accounting does not balance writes nothing and exits non-zero.
+
+`ffmpeg` and `ffprobe` are needed for videos (duration, codec, HDR, container time, Live Photo pair verification, video thumbnails, first-frame detection). Without them the stages still run, leave the video columns blank, say so loudly, and the validate stage flags every unverified pair; set `[tools] ffmpeg` and `ffprobe` in the config, or run `setup.py --fetch-ffmpeg` on Windows, then re-run `index`.
 
 ## Layout
 
 ```
 curate/
-  common.py            config loader, project paths, shared helpers
+  common.py            config loader, project paths, per-year caps, age labels, anchors, pins, priors, media_id
   config.example.toml  copy to <project>/config.toml; the intake fills it
-  requirements.txt     pinned dependencies (Day 2)
-  setup.py             creates the environment, installs, fetches models, reports versions (Day 2)
-  stages/              one module per stage (Day 2)
-  legacy/              the first run's scripts, scrubbed, kept until each is ported
+  requirements.txt     pinned dependencies (installed by setup.py into .venv)
+  setup.py             creates the environment, installs, fetches models, reports versions
+  run.py               runs one stage
+  heic.py              HEIC/JPEG dimensions and conversion, used by the build side where sips is absent
+  stages/              one module per stage, plus _probe.py, _takeout.py, _lenses.py helpers
+  legacy/              the first run's scripts, scrubbed; kept until the smoke test passes, then deleted
   models/              downloaded by setup; see models/README.md for licenses
 ```
 
-## Legacy scripts by stage
+## Status
 
-| Stage | Scripts |
-|---|---|
-| ingest | `flatten.py` |
-| index | `scan.py`, `scan_new.py`, `exif_now.py`, `orient.py`, `burst.py`, `rename.py`, `gps.py`, `inventory.py` |
-| identify (presence only) | `persons.py` |
-| select | `selects.py` (v1), `select_v2.py`, `select_v3.py`, `select_v4.py`, `features.py`, `feat_alts.py`, `feat_swap.py`, `feat_sheet.py` |
-| review | `sheets.py` to `sheets_v4.py`, `repl_pools.py`, `repl_sheets.py`, `repl2_pools.py`, `repl2_sheets.py` |
-| handoff | `handoff_copy.py`, `build_csvs.py`, `copy_v2.py` to `copy_v4.py` |
-| Takeout | `tk_index.py`, `tk_phash.py`, `tk_motion.py`, `tk_score.py`, `tk_seat.py`, `tk_sheets.py`, `tk_integrate.py`, `tk_csv.py`, `tk_sync.py` |
+All seven stages ran end to end on a synthetic project on Windows (ingest through handoff, then the build side's `prep` and `build` on the resulting handoff folder). Not yet exercised: anything that needs ffmpeg, detection quality on real photos (the synthetic fixtures contain no people), the family gate (identity is a later milestone; `[family] gate = "family"` refuses to run until then unless `--allow-presence-gate` is given), and macOS. The Day 3 smoke test on a real sample covers those.
 
-Things the port must change, beyond the paths: the per-call time budget argument (a sandbox ceiling; drop it), the calendar-folder and filename-month priors (config, off by default), the stem-inheritance rung in `rename.py` (gate it by the witness rule in `references/03-validation-gates.md`), the Takeout sidecar lookup in `tk_index.py` (key by member path, quarantine title collisions), and EXIF orientation in `persons.py`.
+Things the port changed on purpose, beyond the paths: the per-call time budget argument is gone; the calendar-folder and filename-month priors are config, off by default; a date is never inherited from another file by stem alone; the Takeout sidecar lookup keys by member path and quarantines title collisions; the identify stage applies EXIF orientation before detection.

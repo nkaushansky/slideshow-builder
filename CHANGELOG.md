@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.3, 2026-09-08
+
+The stages are real. `curate/run.py <stage>` runs `ingest`, `index`, `validate`, `identify`, `select`, `sheets` and `handoff` under `curate/stages/`, each wired to `common.py`, resumable, dry-runnable, printing its counts and refusing to write when its accounting does not balance. New in the port: the validate stage from `references/03` (stem-join witness, era plausibility, prefix-versus-metadata witness, Live Photo pair gate, Takeout title collisions, provisional owner dates); Takeout sidecars indexed inside the zips and keyed by member path; `media_id` (SHA-256) as the identity from ingest to the build ledger; HEIC handled in Python (`curate/heic.py`, pillow-heif) with `sips` kept as the macOS fast path; `curate/setup.py` (venv, pinned `requirements.txt`, YuNet and YOLOv8n fetched and exported at setup with a license manifest, toolchain report, optional Windows ffmpeg fetch).
+
+Build side: every command resolves the project folder (`--project`, `SLIDESHOW_PROJECT`, or the nearest `config.toml`) and never writes into the repository; `add-item` computes `media_id` and writes contract-format `changes.log` lines; `apply-replacements` writes `media.csv` and `changes.log` back into the round folder on every run; Windows `.cmd` wrappers with a `SetThreadExecutionState` keep-awake; Playwright's bundled Chromium tried before installed Chrome.
+
+Tested on Windows with synthetic media only: all seven stages end to end, then `prep` and `build` on the handoff. Untested: ffmpeg paths, detection on real photos, macOS. The legacy scripts stay in `curate/legacy/` until the smoke test passes.
+
 ## 0.0.2, 2026-09-08
 
 Code copied in and scrubbed. The first run's 40 curation scripts are in `curate/legacy/`, and the build side (11 library scripts, the player template, 11 wrappers, three launchers, `prep-options.json`, a blank `overrides.example.json`, `package.json` with Playwright pinned) is in `build/`. Every personal identifier is gone: names, the event, machine names, home paths, first-run photo filenames, tradition places and their coordinates, birth-year constants. Where a script hard-coded a decision from the first run (swap lists, replacement slots, anchors, caps), it now reads a small JSON input or a named constant marked `PORT:`.

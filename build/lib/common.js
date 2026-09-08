@@ -1,16 +1,67 @@
 'use strict';
 // Shared helpers for the build scripts: paths, CSV, probing, process pool.
-// Nothing here ever writes into slideshow-handoff/media/ (add-item is the one sanctioned writer).
+// Nothing here ever writes into handoff/media/ (add-item is the one sanctioned writer).
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
-const ROOT = path.resolve(__dirname, '..', '..');
-const HANDOFF = process.env.SLIDESHOW_HANDOFF ? path.resolve(process.env.SLIDESHOW_HANDOFF) : path.join(ROOT, 'slideshow-handoff');
+const ROOT = path.resolve(__dirname, '..', '..');   // the repository: player.template.html, curate/, tools/, .venv/
+const TOOLS = path.join(ROOT, 'tools');               // optional local toolchain (gitignored): tools/ffmpeg, tools/node
+const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
+
+// ---------- the project folder ----------
+// Every build tool works on one project folder: the one the intake created, holding config.toml. It is found from
+// --project <folder> on the command line (removed from argv here, so the scripts never see it), else SLIDESHOW_PROJECT,
+// else the nearest config.toml at or above the current directory. SLIDESHOW_HANDOFF and SLIDESHOW_BUILD override the two
+// folders explicitly. There is deliberately no fallback into this repository: the build must never write into the code.
+function readTomlStrings(file) {
+  // Minimal reader: quoted string values inside [section] blocks. Enough for [project] and [tools]; nothing else is read here.
+  const cfg = {};
+  let section = '';
+  for (const raw of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const sec = /^\[([^\]]+)\]/.exec(line);
+    if (sec) { section = sec[1].trim(); continue; }
+    const kv = /^([A-Za-z0-9_.-]+)\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(line);
+    if (kv && section) (cfg[section] = cfg[section] || {})[kv[1]] = kv[2].replace(/\\(.)/g, '$1');
+  }
+  return cfg;
+}
+function findProject() {
+  const i = process.argv.indexOf('--project');
+  if (i >= 0) {
+    const p = process.argv[i + 1];
+    if (!p || p.startsWith('--')) throw new Error('--project needs a folder');
+    process.argv.splice(i, 2);
+    return path.resolve(p);
+  }
+  if (process.env.SLIDESHOW_PROJECT) return path.resolve(process.env.SLIDESHOW_PROJECT);
+  let d = process.cwd();
+  for (;;) {
+    if (fs.existsSync(path.join(d, 'config.toml'))) return d;
+    const up = path.dirname(d);
+    if (up === d) return null;
+    d = up;
+  }
+}
+const PROJECT = findProject();
+if (PROJECT && !fs.existsSync(path.join(PROJECT, 'config.toml'))) throw new Error(`no config.toml in ${PROJECT}; run the intake first (it writes the project config)`);
+if (PROJECT) process.env.SLIDESHOW_PROJECT = PROJECT;   // child processes (add-item, prep) land on the same project
+const CFG = PROJECT ? readTomlStrings(path.join(PROJECT, 'config.toml')) : {};
+const cfgProject = CFG.project || {}, cfgTools = CFG.tools || {};
+function projectDir(envName, key) {
+  if (process.env[envName]) return path.resolve(process.env[envName]);
+  if (PROJECT) return path.resolve(PROJECT, cfgProject[key] || key);
+  throw new Error(`no project folder: pass --project <folder>, set SLIDESHOW_PROJECT, or run inside a folder that holds config.toml (${envName} overrides the ${key} folder alone)`);
+}
+const HANDOFF = projectDir('SLIDESHOW_HANDOFF', 'handoff');
+const BUILD = projectDir('SLIDESHOW_BUILD', 'build');
 const MEDIA = path.join(HANDOFF, 'media');
-const BUILD = process.env.SLIDESHOW_BUILD ? path.resolve(process.env.SLIDESHOW_BUILD) : path.join(ROOT, 'build');
-const TOOLS = path.join(ROOT, 'tools');
 const TILES = path.join(BUILD, 'tiles');
 const CLIPS = path.join(BUILD, 'clips');
 const FRAMES = path.join(BUILD, 'frames');
@@ -19,13 +70,25 @@ const FEATURES_TXT = path.join(HANDOFF, 'features.txt');
 const CUT_LIST_CSV = path.join(HANDOFF, 'cut-list.csv');
 const PREP_MANIFEST = path.join(BUILD, 'prep-manifest.json');
 
+// ffmpeg/ffprobe: [tools] in config.toml, else the repo's tools/ffmpeg/, else PATH.
 function toolBin(name) {
-  const p = path.join(TOOLS, 'ffmpeg', name);
-  return fs.existsSync(p) ? p : name;
+  if (cfgTools[name]) return path.resolve(PROJECT || ROOT, cfgTools[name]);
+  for (const cand of [path.join(TOOLS, 'ffmpeg', name + (IS_WIN ? '.exe' : '')), path.join(TOOLS, 'ffmpeg', name)]) if (fs.existsSync(cand)) return cand;
+  return name;
 }
 const FFMPEG = toolBin('ffmpeg');
 const FFPROBE = toolBin('ffprobe');
-const SIPS = '/usr/bin/sips';
+// HEIC and resizing: sips on macOS is the fast path; everywhere else curate/heic.py (pillow-heif) does the same job.
+const SIPS = IS_MAC && fs.existsSync('/usr/bin/sips') ? '/usr/bin/sips' : null;
+const HEIC_PY = path.join(ROOT, 'curate', 'heic.py');
+function pythonBin() {
+  const venv = IS_WIN ? path.join(ROOT, '.venv', 'Scripts', 'python.exe') : path.join(ROOT, '.venv', 'bin', 'python');
+  if (fs.existsSync(venv)) return venv;
+  return IS_WIN ? 'python' : 'python3';
+}
+// Paths for humans (logs) are relative to the project folder; paths for the browser are relative to build/ and use '/'.
+function rel(p) { return path.relative(PROJECT || process.cwd(), p) || '.'; }
+function webRel(from, p) { return path.relative(from, p).split(path.sep).join('/'); }
 
 const STILL_EXT = new Set(['.jpg', '.jpeg', '.heic', '.heif', '.png']);
 const VIDEO_EXT = new Set(['.mov', '.mp4', '.m4v']);
@@ -175,12 +238,91 @@ async function probeVideo(file) {
     range: v.color_range || '', hdr, hasAudio: !!a, creation,
   };
 }
-// Stored (un-rotated) pixel dimensions as sips sees them. sips ignores orientation tags.
+// Stored (un-rotated) pixel dimensions as sips sees them. sips ignores orientation tags. macOS only.
 async function sipsDims(file) {
+  if (!SIPS) throw new Error('sips is macOS only; use imageInfo()');
   const r = await run(SIPS, ['-g', 'pixelWidth', '-g', 'pixelHeight', file]);
   const w = /pixelWidth: (\d+)/.exec(r.out), h = /pixelHeight: (\d+)/.exec(r.out);
   if (r.code !== 0 || !w || !h) throw new Error(`sips could not read ${path.basename(file)}: ${(r.err || r.out).trim()}`);
   return { width: +w[1], height: +h[1] };
+}
+async function heicPy(args) {
+  const r = await run(pythonBin(), [HEIC_PY, ...args]);
+  if (r.code !== 0) throw new Error(`heic.py ${args[0]} failed for ${path.basename(args[1])}: ${(r.err || r.out).trim().split('\n').pop()}`);
+  return r;
+}
+// Facts about any still: displayed width/height (after EXIF orientation), stored dimensions, orientation, DateTimeOriginal.
+// JPEG: pure JS. Anything else: sips (macOS fast path) or curate/heic.py. The three agree on every field.
+async function imageInfo(file) {
+  if (/\.jpe?g$/i.test(file)) {
+    const info = jpegInfo(fs.readFileSync(file));
+    if (info && info.width) {
+      const d = displayedDims(info, info.orientation);
+      return { width: d.width, height: d.height, storedWidth: info.width, storedHeight: info.height, orientation: info.orientation || 1, dateTimeOriginal: exifDateToCsv(info.dateTimeOriginal), tool: 'jpeg' };
+    }
+  }
+  if (SIPS) {
+    const stored = await sipsDims(file);
+    let orientation = 1, dto = '';
+    // sips keeps the EXIF block (orientation, dates) when converting; a tiny JPEG is enough to read it.
+    const tmp = path.join(os.tmpdir(), `heic-info-${process.pid}-${Date.now()}.jpg`);
+    const r = await run(SIPS, ['-Z', '64', '-s', 'format', 'jpeg', file, '--out', tmp]);
+    if (r.code === 0 && fs.existsSync(tmp)) {
+      const info = jpegInfo(fs.readFileSync(tmp));
+      if (info) { orientation = info.orientation || 1; dto = exifDateToCsv(info.dateTimeOriginal); }
+      fs.unlinkSync(tmp);
+    }
+    const d = displayedDims(stored, orientation);
+    return { width: d.width, height: d.height, storedWidth: stored.width, storedHeight: stored.height, orientation, dateTimeOriginal: dto, tool: 'sips' };
+  }
+  const j = JSON.parse((await heicPy(['dims', file])).out);
+  return { width: j.width, height: j.height, storedWidth: j.stored_width, storedHeight: j.stored_height, orientation: j.orientation || 1, dateTimeOriginal: exifDateToCsv(j.date_time_original || ''), tool: 'python' };
+}
+// A JPEG from any still, display height capped at maxHeight (0 = keep size). sips leaves the pixels stored-rotated and
+// keeps the orientation tag; heic.py writes them upright with the tag cleared. Both verify through jpegInfo + displayedDims.
+async function makeJpeg(src, out, { maxHeight = 0, quality = 90, storedRotated = false } = {}) {
+  if (SIPS) {
+    const a = ['-s', 'format', 'jpeg', '-s', 'formatOptions', String(quality)];
+    // sips resamples the STORED image: for a stored-rotated file the displayed height is the stored width.
+    if (maxHeight) a.push(storedRotated ? '--resampleWidth' : '--resampleHeight', String(maxHeight));
+    a.push(src, '--out', out);
+    const r = await run(SIPS, a);
+    if (r.code !== 0 || !fs.existsSync(out)) throw new Error('sips: ' + (r.err || r.out).trim().split('\n').pop());
+    return 'sips';
+  }
+  await heicPy(['convert', src, out, '--max-height', String(maxHeight || 0), '--quality', String(quality)]);
+  return 'python';
+}
+// ---------- identity ----------
+// media_id is the SHA-256 of the bytes (references/02); it is the first column of media.csv and cut-list.csv.
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    fs.createReadStream(file).on('data', d => h.update(d)).on('error', reject).on('end', () => resolve(h.digest('hex')));
+  });
+}
+function ensureMediaIdColumn(header) { if (!header.includes('media_id')) header.unshift('media_id'); }
+// Fill media_id on rows that lack it, hashing the file resolveFile(row) points at when it exists. Returns the count filled.
+async function ensureMediaIds(header, rows, resolveFile) {
+  ensureMediaIdColumn(header);
+  let n = 0;
+  for (const r of rows) {
+    if (r.media_id) continue;
+    const f = resolveFile(r);
+    if (f && fs.existsSync(f)) { r.media_id = await sha256File(f); n++; } else r.media_id = '';
+  }
+  return n;
+}
+// ---------- browser ----------
+// Playwright's bundled Chromium first; installed Google Chrome (channel) when the bundle is missing or will not start.
+async function launchBrowser(log = console.log) {
+  const { chromium } = require('playwright');
+  try { const b = await chromium.launch({ headless: true }); log('browser: Playwright Chromium'); return b; }
+  catch (e) {
+    const first = String(e.message || e).split('\n')[0];
+    try { const b = await chromium.launch({ channel: 'chrome', headless: true }); log(`browser: Google Chrome via channel (bundled Chromium unavailable: ${first})`); return b; }
+    catch (e2) { throw new Error(`no browser could start. Playwright Chromium: ${first}. Chrome channel: ${String(e2.message || e2).split('\n')[0]}. Run "npx playwright install chromium" in build/ or install Google Chrome.`); }
+  }
 }
 // JPEG header facts: stored dims, EXIF Orientation, EXIF DateTimeOriginal. Pure JS, no subprocess.
 function jpegInfo(buf) {
@@ -268,11 +410,21 @@ function readPrepManifest() {
 
 module.exports = {
   FRAMES_PAD_MAX,
-  ROOT, HANDOFF, MEDIA, BUILD, TOOLS, TILES, CLIPS, FRAMES, MEDIA_CSV, FEATURES_TXT, CUT_LIST_CSV, PREP_MANIFEST,
-  FFMPEG, FFPROBE, SIPS, STILL_EXT, VIDEO_EXT, GIF_EXT, MAX_TILE_H, MAX_CLIP_H, SLOWMO_MIN_FPS, IGNORED_FILES,
+  ROOT, PROJECT, HANDOFF, MEDIA, BUILD, TOOLS, TILES, CLIPS, FRAMES, MEDIA_CSV, FEATURES_TXT, CUT_LIST_CSV, PREP_MANIFEST,
+  FFMPEG, FFPROBE, SIPS, HEIC_PY, IS_WIN, IS_MAC, STILL_EXT, VIDEO_EXT, GIF_EXT, MAX_TILE_H, MAX_CLIP_H, SLOWMO_MIN_FPS, IGNORED_FILES,
   CLIP_TYPES, MOVING_TYPES,
-  stemOf, extClass, isHeicLike, tilePath, clipPath,
+  stemOf, extClass, isHeicLike, tilePath, clipPath, rel, webRel, pythonBin,
   parseCsv, serializeCsv, readCsvObjects, writeCsvObjects, readMediaCsv, readFeatures, writeFeatures, atomicWrite,
-  dateKey, run, pool, ffprobeJson, probeVideo, sipsDims, jpegInfo, exifDateToCsv, displayedDims,
+  dateKey, run, pool, ffprobeJson, probeVideo, sipsDims, imageInfo, makeJpeg, jpegInfo, exifDateToCsv, displayedDims,
+  sha256File, ensureMediaIdColumn, ensureMediaIds, launchBrowser,
   clipPlan, even, ensureDirs, fmtSecs, readPrepManifest,
 };
+
+// `node lib/common.js --print build` prints one resolved path (the shell wrappers use it); --paths prints them all as JSON.
+if (require.main === module) {
+  const a = process.argv.slice(2);
+  const all = { root: ROOT, project: PROJECT, handoff: HANDOFF, media: MEDIA, build: BUILD, tiles: TILES, clips: CLIPS, frames: FRAMES, ffmpeg: FFMPEG, ffprobe: FFPROBE, python: pythonBin(), sips: SIPS };
+  const i = a.indexOf('--print');
+  if (i >= 0) { const v = all[a[i + 1]]; if (v == null) { console.error('unknown path ' + a[i + 1] + '; one of ' + Object.keys(all).join(', ')); process.exit(2); } console.log(v); }
+  else console.log(JSON.stringify(all, null, 1));
+}

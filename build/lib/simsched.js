@@ -13,10 +13,9 @@ const loops = i >= 0 ? Number(process.argv[i + 1]) : 1;
 (async () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(C.BUILD, 'manifest.json'), 'utf8'));
   const cfg = manifest.config;
-  const { chromium } = require('playwright');
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await C.launchBrowser();
   const page = await browser.newPage({ viewport: { width: cfg.viewportW, height: cfg.viewportH } });
-  await page.goto('file://' + path.join(C.ROOT, 'player.html') + '?render=1');
+  await page.goto('file://' + path.join(C.BUILD, 'player.html') + '?render=1');
   await page.evaluate(() => window.__ready);
   const info = await page.evaluate(() => window.__renderInfo());
   const t0 = Date.now();

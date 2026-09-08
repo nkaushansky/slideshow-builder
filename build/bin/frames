@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PATH="$ROOT/tools/node/bin:$ROOT/tools/ffmpeg:$PATH"
+export PATH="$ROOT/../tools/node/bin:$ROOT/../tools/ffmpeg:$PATH"
 if command -v caffeinate >/dev/null 2>&1; then exec caffeinate -i node "$ROOT/lib/frames.js" "$@"; fi
 exec node "$ROOT/lib/frames.js" "$@"

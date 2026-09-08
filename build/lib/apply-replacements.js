@@ -10,6 +10,8 @@
 //   notes     : free text, ignored
 // Every row is checked before anything runs; then add-item runs per row and stops at the first failure so the
 // set is never half-applied. --dry-run runs add-item --dry-run per row, which prints the exact plan for each.
+// On every run (dry or real, success or stop) the current media.csv and changes.log are copied into <folder>
+// (<folder>/dry-run/ for a dry run): the return trip of references/02, so the round always carries the live index.
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -23,9 +25,18 @@ const csv = path.join(folder, 'replacements.csv');
 if (!fs.existsSync(csv)) { console.error('missing ' + csv); process.exit(2); }
 const { rows } = C.readCsvObjects(csv);
 const media = new Set(C.readMediaCsv().rows.map(r => r.filename));
-const ADD_ITEM = path.join(C.ROOT, 'scripts', 'add-item');
+const ADD_ITEM = path.join(__dirname, 'add-item.js');
 
 function fail(n, msg) { console.error(`row ${n}: ${msg}`); process.exit(1); }
+function writeBack() {
+  const dest = dry ? path.join(folder, 'dry-run') : folder;
+  fs.mkdirSync(dest, { recursive: true });
+  const copied = [];
+  for (const [src, name] of [[C.MEDIA_CSV, 'media.csv'], [path.join(C.HANDOFF, 'changes.log'), 'changes.log']]) {
+    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(dest, name)); copied.push(name); }
+  }
+  console.log(`write-back: ${copied.join(' and ') || 'nothing'} copied into ${dest}`);
+}
 
 // ---- pass 1: validate every row and build the commands
 const plan = [];
@@ -63,7 +74,8 @@ if (!plan.length) { console.log('replacements.csv has no rows.'); process.exit(0
 for (const p of plan) {
   const cmd = dry ? [...p.cmd, '--dry-run'] : p.cmd;
   console.log(`\n[row ${p.n}] ${p.label}\n  ${cmd.map(a => (/\s/.test(a) ? `'${a}'` : a)).join(' ')}`);
-  const res = spawnSync(cmd[0], cmd.slice(1), { stdio: 'inherit' });
-  if (res.status !== 0) { console.error(`stopped at row ${p.n}; fix and re-run (rows already applied are in slideshow-handoff/changes.log)`); process.exit(1); }
+  const res = spawnSync(process.execPath, cmd, { stdio: 'inherit' });
+  if (res.status !== 0) { console.error(`stopped at row ${p.n}; fix and re-run (rows already applied are in handoff/changes.log)`); writeBack(); process.exit(1); }
 }
+writeBack();
 console.log(`\n${dry ? 'would apply' : 'applied'} ${plan.length} row(s).${dry ? ' Re-run without --dry-run to apply.' : ' Next: bin/build, then bin/live.'}`);
