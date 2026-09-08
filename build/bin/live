@@ -1,0 +1,35 @@
+#!/bin/sh
+# Open the live player in Google Chrome.
+# usage: bin/live [speed] [--labels] [--review] [--t 3m10s]
+#   --review : click tiles to flag them; the panel on the right lists flags (Copy list / Download flags.txt)
+#   --labels : filename and date on every tile, row/chapter/time per row
+#   --t 3m10s: start at that point in the loop
+# Keys: F fullscreen, space pause, [ and ] speed -/+ 10 px/s.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ ! -f "$ROOT/player.html" ]; then echo "player.html missing; run bin/build first" >&2; exit 1; fi
+SPEED=""; LABELS=""; START=""; REVIEW=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --labels) LABELS=1 ;;
+    --review) REVIEW=1 ;;
+    --t) shift; START="$1" ;;
+    *) SPEED="$1" ;;
+  esac; shift
+done
+# review mode uses its own file: macOS `open` strips the query string from file:// URLs, so nothing may depend on ?review=1
+if [ -n "$REVIEW" ]; then PAGE="$ROOT/build/player-review.html"; [ -f "$PAGE" ] || { echo "build/player-review.html missing; run bin/build" >&2; exit 1; }; else PAGE="$ROOT/player.html"; fi
+Q=""
+[ -n "$SPEED" ] && Q="$Q&speed=$SPEED"
+[ -n "$LABELS" ] && Q="$Q&labels=1"
+[ -n "$START" ] && Q="$Q&t=$START"
+URL="file://$PAGE"
+[ -n "$Q" ] && URL="$URL?${Q#&}"
+echo "opening $URL"
+[ -n "$REVIEW" ] && echo "review mode: click a tile to flag it, shift-click to add a note, then use 'Download flags.txt' (lands in ~/Downloads)."
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+if [ -x "$CHROME" ]; then
+  # the binary keeps the query string and hands the URL to a running Chrome
+  "$CHROME" "$URL" >/dev/null 2>&1 &
+else
+  open -a "Google Chrome" "$URL"
+fi

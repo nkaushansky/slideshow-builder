@@ -39,3 +39,6 @@ __pycache__/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Per-project playback overrides carry photo filenames; only the example template ships
+build/overrides.json

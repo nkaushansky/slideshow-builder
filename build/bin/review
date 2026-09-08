@@ -1,0 +1,7 @@
+#!/bin/sh
+# Writes build/review.html (the sequence with names) and opens it in Chrome.
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PATH="$ROOT/tools/node/bin:$PATH"
+node "$ROOT/lib/review.js"
+open -a "Google Chrome" "file://$ROOT/build/review.html"

@@ -1,0 +1,4 @@
+{
+  "_doc": "Per-file prep switches. realtime: clip filenames that should play at real speed even though they were captured at >= 100 fps (default for those is slow motion at 30 fps, like Photos shows them). Re-run bin/prep --force --only <file> after changing.",
+  "realtime": []
+}

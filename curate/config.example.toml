@@ -1,0 +1,111 @@
+# slideshow-builder project configuration.
+#
+# Copy this file to <project folder>/config.toml. The intake in the skill fills it from the
+# owner's answers; every stage reads it and refuses to run without it. Paths may be absolute
+# or relative to the folder holding this file. Dates are TOML dates (YYYY-MM-DD, unquoted).
+# Nothing here is uploaded anywhere; it stays in the project folder with the photos.
+
+[project]
+name = "my-slideshow"
+timezone = "UTC"              # IANA zone used to read video container timestamps (e.g. "Europe/Berlin")
+work = "work"                 # flat working copy of every source file, plus quarantine subfolders
+index = "index"               # items.csv, flags.csv, people.csv, selection.csv, sheets/
+handoff = "handoff"           # the frozen set: media/, media.csv, features.txt, cut-list.csv, changes.log
+build = "build"               # tiles/, clips/, frames/, player.html, renders
+
+# One entry per place the photos come from. kind: takeout | apple-photos | icloud | folder
+[[sources]]
+path = "sources/takeout"
+kind = "takeout"
+
+[[sources]]
+path = "sources/phone-export"
+kind = "folder"
+
+[honoree]
+name = "the honoree"          # printed on contact sheets; never used to guess anything
+birth_year = 2000             # first year of a whole-life show
+birth_month = 1               # 1-12; pro-rates the first year's cap
+
+[family]
+names = ["the honoree"]       # the people who count as family for the selection
+gate = "people"               # "people": any person in frame passes. "family": the identify stage must see one of the names
+seed_photos = "seeds"         # folder with <name>/*.jpg, 5 to 20 clear photos per person, for the identify stage
+
+[show]
+event = "the event"
+event_date = 2000-01-01
+hard_stop = 2000-01-01        # last day a finished file may still be produced; default two days before the event
+first_year = 2000             # scope; defaults to the honoree's birth year
+last_year = 2000              # scope; defaults to the event year
+theme = "whole-life"          # whole-life | trip | activity | stage | people | traditions (see references/04)
+loop_minutes_target = 15
+audio = false
+must_include = []             # filenames or descriptions the owner named; pinned on intake
+off_limits = []               # the family's call; the skill never decides this
+
+[selection]
+lens = "v4"                   # v1 quality | v2 people and motion | v3 breadth | v4 synthesis (recommended)
+cap_per_year = 33             # moments per year; a Live Photo pair costs one slot
+prorate_partial_years = true  # first year from birth_month, last year up to event_date
+diversity_distance = 26       # no pick within this perceptual distance of a seated pick
+featured_fraction = 0.1667    # about one in six stills take larger tiles
+featured_min_per_year = 2
+motion_per_month = 1          # one video or Live Photo per month before the general pool
+
+[priors]
+# Owner-declared rules about the export, applied only as a prior and validated against files
+# that also carry EXIF. Off by default: they were specific to the first run's sources.
+calendar_folder_year_rule = false     # a "<year> calendar" folder holds photos taken in <year + offset>
+calendar_folder_year_offset = -1
+filename_month_rule = false           # a month name inside a filename dates the file to that month
+
+# Recurring events the owner names. Seated before the general pool, tagged on the sheets.
+# Delete the examples you do not use; an empty section is fine.
+[[anchors.date_window]]
+tag = "AUTUMN-TRADITION"
+month = 10
+day_from = 24
+day_to = 31
+
+[[anchors.place]]
+tag = "WINTER-TRIP"
+lat = 0.0
+lon = 0.0
+radius_km = 15
+
+[[anchors.pinned]]
+tag = "LEAVES"
+files = { }                   # { 2020 = "2020-10-18_filename.jpg", 2021 = "..." }; one file per year
+
+[pins]
+files = []                    # owner pins: seated first, never dropped by a date correction
+
+[taste]
+mixed_tiles = true            # mixed tile sizes with occasional larger tiles, no full-screen singles
+live_photos_full = true       # Live Photos play their whole clip and hold the last frame
+videos_silent = true
+chapters = true               # chronological inside short chapters that each sweep the whole span
+captions = false
+
+[machines]
+build_os = ""                 # filled by Step 0
+display_os = ""
+display_resolution = ""       # e.g. "2560x1440"
+player = "vlc"                # vlc | browser | tv
+
+[models]
+# Blank = the setup step's defaults (YOLOv8n exported to ONNX, YuNet). See curate/models/README.md
+# for licenses. Any ONNX detector that outputs boxes and scores works.
+person_detector = ""
+person_input_size = 640
+person_class_index = 0
+face_detector = ""
+face_embedder = ""
+
+[tools]
+# Blank = found on PATH. Step 0 fills these when a tool lives elsewhere (a static ffmpeg build, say).
+ffmpeg = ""
+ffprobe = ""
+chrome = ""
+vlc = ""

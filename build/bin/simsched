@@ -1,0 +1,7 @@
+#!/bin/sh
+# bin/simsched [--loops N] — scheduler statistics over a whole loop, no drawing. Needs Google Chrome; run outside any sandbox.
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PATH="$ROOT/tools/node/bin:$ROOT/tools/ffmpeg:$PATH"
+export NODE_PATH="$ROOT/node_modules"
+exec node "$ROOT/lib/simsched.js" "$@"

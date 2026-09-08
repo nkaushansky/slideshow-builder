@@ -1,0 +1,9 @@
+{
+  "_doc": "Per-item playback overrides, keyed by media.csv filename. start: seconds into a standalone video to begin. trimStart/trimEnd: seconds trimmed from a Live Photo or GIF clip. Defaults are 0; change only after the owner's review, then re-run build. Copy this file to overrides.json next to it and fill in items.",
+  "items": {
+    "YYYY-MM-DD_EXAMPLE.MOV": {
+      "start": 0,
+      "_why": "explain in one line why this clip starts here, so the next person does not undo it"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "slideshow-builder-build",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scrolling photo mosaic: build, live player, deterministic mp4 render",
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}

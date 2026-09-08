@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>slideshow</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #07070F; overflow: hidden; cursor: none; }
+  body.review { cursor: default; }
+  body.review .tile { cursor: pointer; }
+  .tile.flagged { outline: 6px solid #ff3b3b; outline-offset: -6px; }
+  .tile.flagged .label { background: rgba(180,20,20,.85); }
+  #flags { position: fixed; right: 0; top: 0; bottom: 0; width: 440px; background: rgba(10,10,20,.92); color: #eee; font: 15px/1.4 -apple-system, Helvetica, sans-serif; padding: 14px 16px; box-sizing: border-box; overflow: auto; display: none; z-index: 5; }
+  body.review #flags { display: block; }
+  #flags h3 { margin: 0 0 8px; font-size: 16px; } #flags button { font: inherit; padding: 6px 10px; margin: 0 6px 10px 0; cursor: pointer; }
+  #flags ol { padding-left: 22px; margin: 6px 0; } #flags li { margin: 4px 0; word-break: break-all; } #flags li i { color: #ffd27a; }
+  #flags .hint { color: #aaa; font-size: 13px; margin-top: 10px; }
+  #stage { position: absolute; left: 0; top: 0; width: 2560px; height: 1440px; overflow: hidden; background: #07070F; transform-origin: 0 0; }
+  .row { position: absolute; left: 0; top: 0; width: 2560px; will-change: transform; }
+  .tile { position: absolute; top: 0; overflow: hidden; background: #0c0c16; }
+  .tile img, .tile video { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .label { position: absolute; left: 0; bottom: 0; max-width: 100%; padding: 6px 10px; font: 600 19px/1.25 -apple-system, Helvetica, sans-serif; color: #fff; background: rgba(0,0,0,.62); white-space: pre; pointer-events: none; }
+  .rowtag { position: absolute; left: 0; top: 0; padding: 4px 10px; font: 700 22px/1.2 -apple-system, Helvetica, sans-serif; color: #ffd; background: rgba(120,40,0,.75); pointer-events: none; }
+  #hud { position: fixed; left: 24px; bottom: 20px; font: 22px/1.3 -apple-system, Helvetica, sans-serif; color: #ddd; background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .4s; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="hud"></div>
+<div id="flags"><h3>Flagged for swap (<span id="nflags">0</span>)</h3><button id="copyFlags">Copy list</button><button id="dlFlags">Download flags.txt</button><button id="clearFlags">Clear</button><ol id="flagList"></ol><div class="hint">Click a tile to flag or unflag it. Shift-click adds a note (cut / start later / out of order…). Space pauses, F fullscreen. The list is kept in this browser between runs; download it and run <code>bin/candidates $(cut -f1 ~/Downloads/flags.txt)</code> for replacement ideas.</div></div>
+<script>
+/*__MANIFEST__*/
+(() => {
+  'use strict';
+  // ---------------------------------------------------------------------------------------------
+  // slideshow player. Everything that moves is a pure function of the virtual clock t:
+  //   scroll position = speed * t (render) or the running integral of speed (live, where speed can change)
+  //   each moving tile runs its own clock from the moment the scheduler granted it a slot.
+  // Modes: live (default): <video> tiles from build/clips, keyboard F / space / [ ].
+  //        ?render=1: moving tiles are <img> frame sequences from build/frames, driven by window.__renderTime(ms).
+  // ---------------------------------------------------------------------------------------------
+  const M = MANIFEST, CFG = M.config, L = M.loop.height, VW = CFG.viewportW, VH = CFG.viewportH;
+  const params = new URLSearchParams(location.search);
+  const RENDER = params.get('render') === '1';
+  const REVIEW = params.get('review') === '1' || window.__FORCE_REVIEW === true;   // review aid: click tiles to flag them, list + export
+  const LABELS = params.get('labels') === '1' || REVIEW;   // review aid: filename/date on every tile, row + chapter per row
+  const START_T = parseStart(params.get('t'));          // review aid: start the live player at this time, e.g. t=3m10s or t=190
+  const HOLD = CFG.livePhotoHold, CAP = CFG.movingCap, FPS = CFG.frameFps;
+  const MARGIN = RENDER ? 900 : 700;            // rows are created this far outside the viewport so media is ready
+  const stage = document.getElementById('stage'), hud = document.getElementById('hud');
+  function parseStart(v) { if (!v) return 0; const m = /^(?:(\d+)m)?(\d+(?:\.\d+)?)s?$/.exec(v); return m ? (Number(m[1] || 0) * 60 + Number(m[2])) : (Number(v) || 0); }
+  const rows = M.rows, items = M.items;
+  const chapterOf = r => r.chapter;
+
+  // ---------- state ----------
+  let t = 0, scrollPos = 0, speed = RENDER ? M.loop.speed : (Number(params.get('speed')) || CFG.scrollSpeed);
+  let paused = false, dom = true;
+  const active = new Map();                      // "rowIndex:loop" -> row instance
+  const sched = { granted: new Set(), queue: [] };
+
+  // ---------- row instances ----------
+  function addRow(r, k, y) {
+    const inst = { key: r.i + ':' + k, row: r, k, y, top: 0, el: null, tiles: [] };
+    for (const e of r.items) {
+      const it = items[e.item];
+      const tl = { e, it, inst, moving: it.moving, el: null, media: null, inView: false, asked: false, slot: false, served: false, firstDone: false, startT: 0, enterT: 0, waitingSince: 0, frozenIdx: null, lastSrc: '', holding: false, holdUntil: 0 };
+      if (it.moving) {
+        tl.clipStart = it.kind === 'video' ? it.start : it.trimStart;
+        tl.clipEnd = it.kind === 'video' ? it.duration : Math.max(tl.clipStart + 0.1, it.duration - it.trimEnd);
+        tl.clipLen = tl.clipEnd - tl.clipStart;
+        tl.frameLen = e.frameTo - e.frameFrom;     // seconds of frames generated for this placement
+      }
+      inst.tiles.push(tl);
+    }
+    active.set(inst.key, inst);
+    return inst;
+  }
+  function removeRow(key, inst) {
+    for (const tl of inst.tiles) if (tl.moving && tl.inView) { tl.inView = false; release(tl); }
+    if (inst.el) inst.el.remove();
+    active.delete(key);
+  }
+  function buildDom(inst) {
+    const el = document.createElement('div');
+    el.className = 'row';
+    el.style.height = inst.row.h + 'px';
+    for (const tl of inst.tiles) {
+      const d = document.createElement('div');
+      d.className = 'tile';
+      d.style.left = tl.e.x + 'px'; d.style.width = tl.e.w + 'px'; d.style.height = inst.row.h + 'px';
+      if (!tl.moving) {
+        const img = document.createElement('img'); img.decoding = 'async'; img.src = tl.it.src; tl.media = img; d.appendChild(img);
+      } else if (RENDER) {
+        const img = document.createElement('img'); img.decoding = 'async'; tl.media = img; d.appendChild(img);
+        setFrame(tl, 0);
+      } else {
+        const v = document.createElement('video');
+        v.muted = true; v.playsInline = true; v.preload = 'auto'; v.disablePictureInPicture = true;
+        v.src = tl.it.src;
+        v.addEventListener('loadedmetadata', () => { if (!tl.slot) v.currentTime = tl.clipStart; });
+        tl.media = v; d.appendChild(v);
+      }
+      if (REVIEW && flags[tl.it.id]) d.classList.add('flagged');
+      if (LABELS) { const lb = document.createElement('div'); lb.className = 'label'; lb.textContent = `${tl.it.id}\n${tl.it.date} · ${tl.it.kind}${tl.it.featured ? ' · featured' : ''}${tl.it.slow && tl.it.slow !== 1 ? ' · slow-mo' : ''}`; d.appendChild(lb); }
+      tl.el = d; el.appendChild(d);
+    }
+    if (LABELS) { const rt = document.createElement('div'); rt.className = 'rowtag'; rt.textContent = `row ${inst.row.i} · chapter ${inst.row.chapter + 1} · ${inst.row.type} · t=${fmtT((inst.row.y - VH) / speed)}`; el.appendChild(rt); }
+    inst.el = el; stage.appendChild(el);
+  }
+
+  function fmtT(sec) { sec = Math.max(0, sec); const m = Math.floor(sec / 60); return `${m}m${String(Math.floor(sec - m * 60)).padStart(2, '0')}s`; }
+  // ---------- scheduler: at most CAP moving tiles animate at once ----------
+  // Rules (all driven by the clock, so live and render agree):
+  //   - a Live Photo/GIF asks for a slot once `startVisibleFrac` of its row is on screen (1 = fully scrolled on, 0 = any
+  //     pixel); a standalone video asks as soon as any of it shows. With a free slot a tile starts at once
+  //   - a standalone video gets a slot immediately (videoPriority) if a Live Photo has finished a play (that one freezes);
+  //     otherwise it heads the queue and takes the first slot handed over
+  //   - a Live Photo/GIF that has played `rotatePlays` full times hands its slot on when someone is waiting (rotateSlots),
+  //     freezing on its last frame; if slots free up again later it may restart
+  //   - nobody waits longer than `maxWait` s for a first turn: the longest-running Live Photo is frozen to make room
+  //   - a tile that never got a slot shows frame 0; a frozen tile keeps the frame it was on
+  const ROTATE = CFG.rotateSlots, ROTATE_PLAYS = CFG.rotatePlays || 1, MAX_WAIT = CFG.maxWait || 0, VIDEO_FIRST = CFG.videoPriority;
+  const START_FRAC = Math.min(1, Math.max(0, Number(CFG.startVisibleFrac) || 0));
+  const stats = { waits: [], neverServed: 0, handovers: 0, preempts: 0, entered: 0, startedPartial: 0, firstPlayDone: 0, cutShort: 0, exitMidPlay: 0 };
+  function shownFrac(inst) { return (Math.min(VH, inst.top + inst.row.h) - Math.max(0, inst.top)) / Math.min(inst.row.h, VH); } // share of the row on screen
+  function noteFirstPlay(tl) {                // stats bookkeeping: has this Live Photo/GIF got through its first play?
+    if (tl.it.kind === 'video' || tl.firstDone) return true;
+    if (playsDone(tl) >= 1) { tl.firstDone = true; stats.firstPlayDone++; return true; }
+    return false;
+  }
+  function cycleOf(tl) { return tl.it.kind === 'video' ? Infinity : tl.clipLen + HOLD; }
+  function playsDone(tl) { return tl.it.kind === 'video' ? 0 : Math.floor((t - tl.startT + HOLD) / cycleOf(tl)); }
+  function priority(tl) { return (tl.it.kind === 'video' ? 0 : tl.served ? 2 : 1); }
+  function request(tl) {
+    tl.waitingSince = t;
+    if (sched.granted.size < CAP) return grant(tl);
+    if (VIDEO_FIRST && tl.it.kind === 'video') {
+      // a video takes a slot at once, but only from a Live Photo that has finished a play; otherwise it heads the queue and
+      // gets the first slot handed over (a Live Photo play is ~3 s and the video is still scrolling on), maxWait as backstop
+      const v = pickVictim(); if (v && playsDone(v) >= 1) { freeze(v); stats.preempts++; return grant(tl); }
+    }
+    sched.queue.push(tl);
+  }
+  function pickVictim() {
+    let best = null, bestScore = -Infinity;
+    for (const g of sched.granted) if (g.it.kind !== 'video') { const sc = playsDone(g) * 1000 + (t - g.startT); if (sc > bestScore) { bestScore = sc; best = g; } }
+    return best;
+  }
+  function grant(tl) {
+    if (!tl.served) { stats.waits.push(t - tl.enterT); tl.served = true; if (tl.it.kind !== 'video' && shownFrac(tl.inst) < 1 - 1e-6) stats.startedPartial++; }
+    tl.slot = true; tl.startT = t; tl.holding = false; tl.frozenIdx = null; sched.granted.add(tl);
+    const v = tl.media;
+    if (!RENDER && v) { try { v.currentTime = tl.clipStart; } catch (_) {} v.play().catch(() => {}); }
+  }
+  function freeze(tl) {                       // keep the current frame, give the slot up for good this pass
+    if (!noteFirstPlay(tl)) stats.cutShort++;
+    tl.frozenIdx = frameIndexFor(tl);
+    tl.slot = false; sched.granted.delete(tl);
+    const v = tl.media; if (!RENDER && v) v.pause();
+  }
+  function handOver(tl) {                     // finished a play: hold the last frame, rejoin the queue as a repeater
+    freeze(tl); stats.handovers++;
+    tl.waitingSince = t; sched.queue.push(tl);
+  }
+  function release(tl) {                      // left the viewport
+    const qi = sched.queue.indexOf(tl); if (qi >= 0) sched.queue.splice(qi, 1);
+    if (!tl.served) stats.neverServed++;
+    tl.frozenIdx = null; tl.asked = false;
+    if (!tl.slot) return;
+    if (!noteFirstPlay(tl)) stats.exitMidPlay++;
+    tl.slot = false; sched.granted.delete(tl);
+    const v = tl.media; if (!RENDER && v) { v.pause(); try { v.currentTime = tl.clipStart; } catch (_) {} }
+  }
+  function serveQueue() {
+    while (sched.granted.size < CAP && sched.queue.length) {
+      sched.queue.sort((a, b) => priority(a) - priority(b) || a.waitingSince - b.waitingSince || a.e.x - b.e.x);
+      grant(sched.queue.shift());
+    }
+  }
+  function schedule() {
+    const firstTimers = () => sched.queue.filter(q => !q.served);
+    if (ROTATE && firstTimers().length) for (const g of [...sched.granted]) if (g.it.kind !== 'video' && playsDone(g) >= ROTATE_PLAYS) handOver(g);
+    if (MAX_WAIT > 0) {
+      for (const w of firstTimers().sort((a, b) => a.waitingSince - b.waitingSince)) {
+        if (t - w.waitingSince < MAX_WAIT || sched.granted.size < CAP) break;
+        const v = pickVictim(); if (!v) break;
+        freeze(v); stats.preempts++;
+      }
+    }
+    serveQueue();
+  }
+  window.__schedStats = () => { const w = stats.waits.slice().sort((a, b) => a - b); const q = p => (w.length ? w[Math.min(w.length - 1, Math.floor(p * w.length))] : 0); return { entered: stats.entered, served: w.length, neverServed: stats.neverServed, handovers: stats.handovers, preempts: stats.preempts, startedPartial: stats.startedPartial, firstPlayDone: stats.firstPlayDone, cutShort: stats.cutShort, exitMidPlay: stats.exitMidPlay, waitMean: w.length ? w.reduce((a, b) => a + b, 0) / w.length : 0, waitP50: q(0.5), waitP90: q(0.9), waitMax: w.length ? w[w.length - 1] : 0, waitOver4: w.filter(x => x > 4).length, waitOver2: w.filter(x => x > 2).length }; };
+
+  // ---------- per-frame update ----------
+  function update(tNew) {
+    const dt = tNew - t; t = tNew;
+    scrollPos = RENDER ? speed * t : scrollPos + speed * dt;
+    const zoneTop = scrollPos - MARGIN, zoneBot = scrollPos + VH + MARGIN;
+    const wanted = new Set();
+    for (let k = Math.floor(zoneTop / L); k <= Math.floor(zoneBot / L); k++) {
+      for (const r of rows) {
+        const y = r.y + k * L;
+        if (y < zoneBot && y + r.h > zoneTop) { const key = r.i + ':' + k; wanted.add(key); if (!active.has(key)) addRow(r, k, y); }
+      }
+    }
+    for (const [key, inst] of active) if (!wanted.has(key)) removeRow(key, inst);
+    // viewport membership drives the scheduler: a tile asks for a slot once START_FRAC of its row is on screen (ask order = queue order)
+    const entering = [];
+    for (const inst of active.values()) {
+      inst.top = inst.y - scrollPos;
+      const inView = inst.top < VH && inst.top + inst.row.h > 0;
+      const shown = inView ? shownFrac(inst) : 0;
+      for (const tl of inst.tiles) if (tl.moving) {
+        if (inView && !tl.inView) tl.inView = true;
+        else if (!inView && tl.inView) { tl.inView = false; release(tl); }
+        // a standalone video runs for its whole pass, so it may start as soon as it appears; a Live Photo/GIF waits for the full frame
+        const ready = inView && shown + 1e-6 >= (tl.it.kind === 'video' ? 0 : START_FRAC);
+        if (tl.inView && ready && !tl.asked) { tl.asked = true; tl.enterT = t; entering.push(tl); }
+      }
+    }
+    entering.sort((a, b) => a.e.x - b.e.x || (a.it.id < b.it.id ? -1 : 1)); // left to right, deterministic
+    for (const tl of entering) { stats.entered++; request(tl); }
+    schedule();
+    if (dom) paint();
+  }
+  function paint() {
+    for (const inst of active.values()) {
+      if (!inst.el) buildDom(inst);
+      inst.el.style.transform = 'translate3d(0,' + inst.top.toFixed(3) + 'px,0)';
+      for (const tl of inst.tiles) if (tl.moving) paintMoving(tl);
+    }
+  }
+  // local clock of a moving tile -> which frame it shows
+  function frameIndexFor(tl) {
+    if (tl.frozenIdx != null) return tl.frozenIdx;
+    if (!tl.slot) return 0;
+    const u = t - tl.startT;
+    if (tl.it.kind === 'video') { const pos = u % tl.clipLen; return Math.min(tl.e.frameCount - 1, Math.floor(pos * FPS)); }
+    const cycle = tl.clipLen + HOLD, pos = u % cycle;
+    if (pos >= tl.clipLen) return tl.e.frameCount - 1;                    // hold on the last frame
+    return Math.min(tl.e.frameCount - 1, Math.floor(pos * FPS));
+  }
+  function frameSrc(tl, idx) { return tl.e.frameDir + '/' + String(idx + 1).padStart(4, '0') + '.jpg'; }
+  function setFrame(tl, idx) {
+    const src = frameSrc(tl, idx);
+    if (src !== tl.lastSrc) { tl.lastSrc = src; tl.media.src = src; }
+    if (tl.slot && idx + 1 < tl.e.frameCount) { const pre = new Image(); pre.src = frameSrc(tl, idx + 1); }
+  }
+  function paintMoving(tl) {
+    if (RENDER) { setFrame(tl, frameIndexFor(tl)); return; }
+    const v = tl.media;
+    if (!v || !tl.slot) return;
+    if (tl.it.kind === 'video') {
+      if (v.ended || (v.duration && v.currentTime >= tl.clipEnd - 0.03)) { v.currentTime = tl.clipStart; v.play().catch(() => {}); }
+      return;
+    }
+    // Live Photo / GIF: play through, hold the last frame, restart (no ping-pong)
+    if (!tl.holding && (v.ended || (v.duration && v.currentTime >= tl.clipEnd - 0.03))) { v.pause(); tl.holding = true; tl.holdUntil = t + HOLD; }
+    else if (tl.holding && t >= tl.holdUntil) { tl.holding = false; v.currentTime = tl.clipStart; v.play().catch(() => {}); }
+  }
+
+  // ---------- fit the 2560x1440 stage into the window (1:1 on the iMac) ----------
+  function fit() {
+    const s = Math.min(innerWidth / VW, innerHeight / VH);
+    stage.style.transform = 'translate(' + ((innerWidth - VW * s) / 2).toFixed(2) + 'px,' + ((innerHeight - VH * s) / 2).toFixed(2) + 'px) scale(' + s.toFixed(5) + ')';
+  }
+  addEventListener('resize', fit); fit();
+
+  // ---------- render mode API ----------
+  async function decodeActive() {
+    const ps = [];
+    for (const inst of active.values()) for (const tl of inst.tiles) if (tl.media && tl.media.tagName === 'IMG' && tl.media.src) ps.push(tl.media.decode().catch(() => {}));
+    await Promise.all(ps);
+  }
+  if (RENDER) {
+    dom = true;
+    window.__renderWarmup = (seconds) => {            // run the scheduler through the preceding stretch, no DOM
+      dom = false; const step = 1 / CFG.renderFps;
+      for (let tt = -seconds; tt < -1e-9; tt += step) update(tt);
+      dom = true; update(0);
+      return { active: active.size, playing: sched.granted.size, queued: sched.queue.length };
+    };
+    window.__schedSnapshot = () => {                   // canonical scheduler state relative to t, for the periodicity check
+      const tiles = [];
+      for (const inst of active.values()) for (const tl of inst.tiles) if (tl.moving) {
+        tiles.push([inst.row.i, tl.e.x, tl.inView ? 1 : 0, tl.asked ? 1 : 0, tl.slot ? 1 : 0, tl.served ? 1 : 0, tl.firstDone ? 1 : 0,
+          tl.frozenIdx == null ? -1 : tl.frozenIdx, tl.slot ? Math.round((t - tl.startT) * 1000) : -1,
+          sched.queue.includes(tl) ? Math.round((t - tl.waitingSince) * 1000) : -1]);
+      }
+      tiles.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      const order = tl => [tl.inst.row.i, tl.e.x];
+      return JSON.stringify({ tiles, granted: [...sched.granted].map(order), queue: sched.queue.map(order) });
+    };
+    window.__renderWarmupLoops = (loopSeconds, maxLoops) => {   // whole loops ending at t = 0; reports whether the state repeats loop to loop
+      dom = false; const step = 1 / CFG.renderFps, frames = Math.round(loopSeconds * CFG.renderFps);
+      let prev = null, periodicAfter = -1, periodic = false;
+      for (let n = 0; n < maxLoops; n++) {
+        const base = -(maxLoops - n) * loopSeconds;
+        for (let j = 0; j < frames; j++) update(base + j * step);
+        const snap = window.__schedSnapshot();          // same phase every loop: one step before the boundary
+        periodic = snap === prev; if (periodic && periodicAfter < 0) periodicAfter = n;
+        prev = snap;
+      }
+      dom = true; update(0);
+      return { loops: maxLoops, periodicAfter, periodic, active: active.size, playing: sched.granted.size, queued: sched.queue.length };
+    };
+    window.__renderSeek = (ms) => {   // step the scheduler from t = 0 up to ms without drawing (bin/render --from)
+      dom = false; const step = 1 / CFG.renderFps, frames = Math.round(ms / 1000 * CFG.renderFps);
+      for (let j = 0; j < frames; j++) update(j * step);
+      dom = true; update(ms / 1000);
+      return { t, active: active.size, playing: sched.granted.size, queued: sched.queue.length };
+    };
+    window.__renderTime = async (ms) => {
+      update(ms / 1000);
+      await decodeActive();
+      return { t, scrollPos, active: active.size, playing: sched.granted.size, queued: sched.queue.length };
+    };
+    window.__renderInfo = () => ({ loop: M.loop, rows: rows.length, items: items.length, built: M.built });
+    // Frame export: draw the visible tiles into a canvas (same geometry as the DOM) and ship the raw RGBA pixels to the
+    // render script over a WebSocket. Chrome's own screenshot encoder needs ~350 ms per 2560x1440 frame and fetch() uploads
+    // crawl at ~6 MB/s; a WebSocket moves the 14.7 MB frame in tens of milliseconds and the pixels stay lossless.
+    const canvas = document.createElement('canvas'); canvas.width = VW; canvas.height = VH;
+    const cx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';   // tiles are downscaled ~2-3x; bilinear alone would shimmer
+    function draw() {
+      cx.fillStyle = CFG.background; cx.fillRect(0, 0, VW, VH);
+      let drawn = 0, missing = 0;
+      for (const inst of active.values()) {
+        const top = inst.top, h = inst.row.h;
+        if (top >= VH || top + h <= 0) continue;
+        for (const tl of inst.tiles) {
+          const img = tl.media;
+          if (!img || !img.complete || !(img.naturalWidth > 0)) { missing++; continue; }
+          // object-fit: cover, done by clipping to the tile box and drawing the whole image scaled; avoids source-rect
+          // semantics on EXIF-rotated images
+          const bw = tl.e.w, iw = img.naturalWidth, ih = img.naturalHeight;
+          const sc = Math.max(bw / iw, h / ih), dw = iw * sc, dh = ih * sc;
+          cx.save(); cx.beginPath(); cx.rect(tl.e.x, top, bw, h); cx.clip();
+          cx.drawImage(img, tl.e.x + (bw - dw) / 2, top + (h - dh) / 2, dw, dh);
+          cx.restore();
+          drawn++;
+        }
+      }
+      return { drawn, missing };
+    }
+    let ws = null, wsAck = null;
+    window.__renderConnect = url => new Promise((resolve, reject) => {
+      ws = new WebSocket(url); ws.binaryType = 'arraybuffer';
+      ws.onopen = () => resolve(true); ws.onerror = () => reject(new Error('websocket error'));
+      ws.onmessage = ev => { if (wsAck) { const f = wsAck; wsAck = null; f(String(ev.data)); } };
+      ws.onclose = () => { if (wsAck) { const f = wsAck; wsAck = null; f('closed'); } };
+    });
+    const JPEG_Q = Number(params.get('q')) || 0.95;   // canvas -> JPEG -> websocket: ~50 ms/frame; raw RGBA took 150-300 ms
+    window.__renderFrame = async (ms, send) => {
+      update(ms / 1000);
+      await decodeActive();
+      const d = draw();
+      let ack = null, bytes = 0;
+      if (send) {
+        if (!ws || ws.readyState !== 1) throw new Error('websocket not connected');
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', JPEG_Q));
+        const buf = await blob.arrayBuffer(); bytes = buf.byteLength;
+        const ackP = new Promise(r => { wsAck = r; });
+        ws.send(buf);
+        ack = await ackP;                      // the render script acks once the frame reached ffmpeg: backpressure
+        if (!/^ok/.test(ack)) throw new Error('frame not accepted: ' + ack);
+      }
+      return { t, scrollPos, drawn: d.drawn, missing: d.missing, playing: sched.granted.size, queued: sched.queue.length, bytes, ack };
+    };
+    window.__renderCanvasDataURL = () => canvas.toDataURL('image/png');
+    update(0);
+    window.__ready = decodeActive().then(() => true);
+    return;
+  }
+
+  // ---------- review mode: click to flag ----------
+  const FLAG_KEY = 'slideshow-flags';
+  let flags = {};
+  try { flags = JSON.parse(localStorage.getItem(FLAG_KEY) || '{}') || {}; } catch (_) { flags = {}; }
+  function saveFlags() { try { localStorage.setItem(FLAG_KEY, JSON.stringify(flags)); } catch (_) {} renderFlags(); }
+  function flagText() { return Object.keys(flags).sort().map(id => `${id}\t${flags[id].note || ''}\t${flags[id].at || ''}`).join('\n') + (Object.keys(flags).length ? '\n' : ''); }
+  function renderFlags() {
+    if (!REVIEW) return;
+    const ids = Object.keys(flags).sort();
+    document.getElementById('nflags').textContent = ids.length;
+    document.getElementById('flagList').innerHTML = ids.map(id => `<li>${id.replace(/&/g, '&amp;').replace(/</g, '&lt;')}${flags[id].note ? ` <i>— ${String(flags[id].note).replace(/&/g, '&amp;').replace(/</g, '&lt;')}</i>` : ''}</li>`).join('');
+    for (const inst of active.values()) for (const tl of inst.tiles) if (tl.el) tl.el.classList.toggle('flagged', !!flags[tl.it.id]);
+  }
+  if (REVIEW) {
+    document.body.classList.add('review');
+    stage.addEventListener('click', ev => {
+      const d = ev.target.closest('.tile'); if (!d) return;
+      let hit = null;
+      for (const inst of active.values()) for (const tl of inst.tiles) if (tl.el === d) hit = tl;
+      if (!hit) return;
+      const id = hit.it.id;
+      if (ev.shiftKey) { const note = prompt(`Note for ${id}`, (flags[id] && flags[id].note) || ''); if (note === null) return; flags[id] = { note, at: fmtT(t) }; }
+      else if (flags[id]) delete flags[id];
+      else flags[id] = { note: '', at: fmtT(t) };
+      saveFlags();
+    });
+    document.getElementById('copyFlags').onclick = () => { navigator.clipboard.writeText(flagText()).then(() => flash('copied ' + Object.keys(flags).length + ' filenames'), () => flash('copy failed; use download')); };
+    document.getElementById('dlFlags').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([flagText()], { type: 'text/plain' })); a.download = 'flags.txt'; document.body.appendChild(a); a.click(); a.remove(); };
+    document.getElementById('clearFlags').onclick = () => { if (confirm('Clear all flags?')) { flags = {}; saveFlags(); } };
+    renderFlags();
+  }
+
+  // ---------- live mode ----------
+  let showHudUntil = 0;
+  function flash(msg) { hud.textContent = msg; hud.style.opacity = 1; showHudUntil = performance.now() + 1800; }
+  addEventListener('keydown', ev => {
+    if (ev.key === 'f' || ev.key === 'F') { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => {}); }
+    else if (ev.key === ' ') { paused = !paused; flash(paused ? 'paused' : 'playing'); ev.preventDefault(); }
+    else if (ev.key === '[') { speed = Math.max(40, speed - 10); flash(speed + ' px/s'); }
+    else if (ev.key === ']') { speed = Math.min(240, speed + 10); flash(speed + ' px/s'); }
+  });
+  let lastReal = performance.now();
+  if (START_T > 0) { t = START_T; scrollPos = speed * START_T; }
+  function step(now) {
+    if (LABELS) { hud.style.opacity = 1; hud.textContent = `t=${fmtT(t)}  ${speed} px/s  loop ${fmtT(L / speed)}`; }
+    const dt = Math.min(0.1, (now - lastReal) / 1000); lastReal = now;
+    if (!paused) update(t + dt);
+    if (showHudUntil && now > showHudUntil) { hud.style.opacity = 0; showHudUntil = 0; }
+    requestAnimationFrame(step);
+  }
+  update(t);
+  requestAnimationFrame(step);
+})();
+</script>
+</body>
+</html>
