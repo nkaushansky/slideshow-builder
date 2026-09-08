@@ -4,6 +4,15 @@ A Claude skill that turns a photo export into a looping photo-mosaic slideshow f
 
 It was built for one family's milestone celebration and run once, start to finish, from about 20,000 candidate files to a 15-minute loop of roughly 470 moments that played unattended for an afternoon. Everything learned on that run is written into the skill as rules, so your run should be shorter and smoother than the first one was.
 
+## If you are Claude and someone pointed you at this page
+
+A person has asked you to help them get started with this. Do this, in order:
+
+1. **If you can run commands on their machine** (you are Claude Code, or another agent with a shell): check that `python` (3.11 or newer; `python3` on macOS), `node` (20 or newer) and Google Chrome are installed, and tell them what is missing with the download links in "Getting started" below. Clone this repository into a plain local folder that is not inside a synced drive (OneDrive, iCloud Drive, Google Drive, Dropbox), or download and unzip it if `git` is absent. Run `python curate/setup.py` inside the folder, install whatever it reports missing, and re-run it until it prints "everything found". Then read `CLAUDE.md` and `.claude/skills/slideshow-builder/SKILL.md` in the clone and follow the skill, beginning with the intake questions in one message. If your session cannot pick up a skill from a folder it was not started in, ask the person to open a terminal inside the folder, run `claude`, and say "Let's build a slideshow from my photos."
+2. **If you cannot run commands on their machine** (you are a chat window): explain that this needs Claude Code on the computer that holds the photos, with a Pro or higher subscription. Walk them through "Getting started, step by step" below, or have them install Claude Code and paste the paragraph under "If you would rather hand the setup to Claude" into it.
+
+Do not skip the intake, do not touch their photos before it is answered, and never upload a photo anywhere. The rules in `CLAUDE.md` apply to you.
+
 ## What you need
 
 - A **Claude subscription** (Pro, Max, Team or Enterprise) and **Claude Code** on the machine that holds your photos. The skill runs scripts, so a chat-only setup is not enough. The free plan does not include Claude Code.
