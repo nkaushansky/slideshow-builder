@@ -125,7 +125,8 @@ function preparedAudio(prep) {
     const e = list.find(x => x && x.index === k);
     if (!e) return { enabled: false, tracks, why: `track ${k} (${name}) is not in prep-manifest.json; run bin/prep` };
     if (path.resolve(String(e.source)) !== path.resolve(src)) return { enabled: false, tracks, why: `track ${k} was prepared from ${e.source}, show.json names ${src}; run bin/prep --force --audio-only` };
-    if (!e.ok || !(e.duration > 0)) return { enabled: false, tracks, why: `track ${k} (${name}) failed its prep check; run bin/prep --force --audio-only` };
+    // a track is good only when prep said so outright: an entry with no `ok` at all was written by something older than the audio step
+    if (e.ok !== true || !(e.duration > 0)) return { enabled: false, tracks, why: `track ${k} (${name}) failed its prep check; run bin/prep --force --audio-only` };
     const abs = path.join(BUILD, String(e.path));
     if (!fs.existsSync(abs)) return { enabled: false, tracks, why: `${e.path} is missing; run bin/prep` };
     tracks.push({ index: k, source: src, path: String(e.path), abs, duration: e.duration });

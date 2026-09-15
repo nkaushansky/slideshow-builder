@@ -7,15 +7,17 @@
 //   build/prep-manifest.json    per-file facts that build/render rely on (clip durations, slow-motion, HDR, dims, the audio tracks)
 //   build/prep-report.txt       verification report; build/prep.log has the per-file lines
 // Idempotent: existing outputs are skipped unless --force. Outputs are written to a temp name and renamed.
-// Usage: bin/prep [--only <filename>]... [--force] [--tiles-only|--clips-only|--audio-only] [--verify-only] [--jobs N] [--quiet]
+// --dry-run verifies the set, probes the clips and prints what every tile, clip and track would be (made, skipped,
+// remade with --force, or a missing source) without writing a single file, not even the log or the manifest.
+// Usage: bin/prep [--only <filename>]... [--force] [--tiles-only|--clips-only|--audio-only] [--verify-only] [--dry-run] [--jobs N] [--quiet]
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const C = require('./common');
 
-const USAGE = 'usage: bin/prep [--only <filename>]... [--force] [--tiles-only|--clips-only|--audio-only] [--verify-only] [--jobs N] [--quiet]';
-const opt = { only: [], force: false, tiles: true, clips: true, audio: true, verifyOnly: false, jobs: 0, quiet: false };
+const USAGE = 'usage: bin/prep [--only <filename>]... [--force] [--tiles-only|--clips-only|--audio-only] [--verify-only] [--dry-run] [--jobs N] [--quiet]';
+const opt = { only: [], force: false, tiles: true, clips: true, audio: true, verifyOnly: false, dryRun: false, jobs: 0, quiet: false };
 {
   const a = process.argv.slice(2);
   for (let i = 0; i < a.length; i++) {
@@ -25,6 +27,7 @@ const opt = { only: [], force: false, tiles: true, clips: true, audio: true, ver
     else if (a[i] === '--clips-only') { opt.tiles = false; opt.audio = false; }
     else if (a[i] === '--audio-only') { opt.tiles = false; opt.clips = false; }
     else if (a[i] === '--verify-only') opt.verifyOnly = true;
+    else if (a[i] === '--dry-run') opt.dryRun = true;
     else if (a[i] === '--jobs') opt.jobs = Number(a[++i]);
     else if (a[i] === '--quiet') opt.quiet = true;
     else if (a[i] === '-h' || a[i] === '--help') { console.log(USAGE); process.exit(0); }
@@ -64,6 +67,26 @@ function loadOptions() {
     return { file, realtime: list('realtime'), slow: list('slow') };
   }
   return { file: '', realtime: [], slow: [] };
+}
+
+// ---------- --dry-run: the plan, decided exactly as the make* functions decide it ----------
+function planStatus(out, src) {
+  if (!opt.force && exists(out)) return 'already there, skipped';
+  if (!exists(src)) return 'SOURCE MISSING';
+  return exists(out) ? 'would be remade (--force)' : 'would be made';
+}
+function planList(kind, todo, label, outOf, srcOf, extra) {
+  const tally = new Map();
+  todo.forEach((r, i) => {
+    const s = planStatus(outOf(r), srcOf(r));
+    tally.set(s, (tally.get(s) || 0) + 1);
+    log(`  [${kind} ${i + 1}/${todo.length}] ${label(r)} -> ${C.rel(outOf(r))}: ${s}${extra ? extra(r) : ''}`);
+  });
+  const plural = kind === 'audio' ? 'audio tracks' : kind + 's';
+  const line = `${plural}: ` + (todo.length ? [...tally].map(([s, n]) => `${n} ${s}`).join(', ') : 'nothing to do');
+  say('  ' + line);
+  note('dry run ' + line);
+  if (tally.get('SOURCE MISSING')) warn(`${tally.get('SOURCE MISSING')} ${kind}(s) have no source file; a real run would report them as FAILED`);
 }
 
 // ---------- set verification (the HANDOFF.md checks plus a few of our own) ----------
@@ -226,9 +249,12 @@ async function verifyAudio(k, src) {
 
 async function main() {
   const t0 = Date.now();
-  C.ensureDirs();
-  logStream = fs.createWriteStream(path.join(C.BUILD, 'prep.log'), { flags: 'a' });
-  log(`\n==== prep ${new Date().toISOString()} ${process.argv.slice(2).join(' ')}`);
+  if (opt.dryRun) say('prep --dry-run: the set is verified and the clips are probed; nothing at all is written (no tiles, clips or tracks, no manifest, no report, no log)');
+  else {
+    C.ensureDirs();
+    logStream = fs.createWriteStream(path.join(C.BUILD, 'prep.log'), { flags: 'a' });
+    log(`\n==== prep ${new Date().toISOString()} ${process.argv.slice(2).join(' ')}`);
+  }
   const options = loadOptions();
   const realtimeList = new Set(options.realtime), slowList = new Set(options.slow);
   const isRealtime = f => (slowMode === 'realtime' ? !slowList.has(f) : realtimeList.has(f));
@@ -248,7 +274,12 @@ async function main() {
   const failures = [];
 
   // ---- tiles
-  if (opt.tiles && !opt.verifyOnly) {
+  if (opt.tiles && !opt.verifyOnly && opt.dryRun) {
+    const todo = pick(stills);
+    say(`Tiles: ${todo.length} stills -> ${C.rel(C.TILES)} (maximum height ${C.MAX_TILE_H} px)`);
+    planList('tile', todo, r => r.filename, r => C.tilePath(r.filename), r => path.join(C.MEDIA, r.filename),
+      r => (+r.height > C.MAX_TILE_H ? ` (${r.width}x${r.height}, resized to ${C.MAX_TILE_H} high)` : ` (${r.width}x${r.height}, no resize)`));
+  } else if (opt.tiles && !opt.verifyOnly) {
     const todo = pick(stills);
     say(`Tiles: ${todo.length} stills, ${JOBS} at a time -> ${C.rel(C.TILES)}`);
     let n = 0;
@@ -289,7 +320,15 @@ async function main() {
   const unknown = [...options.realtime, ...options.slow].filter(f => !byName.has(f));
   if (unknown.length) warn(`prep-options.json names ${unknown.length} file(s) not in media.csv: ${unknown.join(', ')}`);
 
-  if (opt.clips && !opt.verifyOnly) {
+  if (opt.clips && !opt.verifyOnly && opt.dryRun) {
+    const todo = pick(clips).filter(r => probes.has(r.filename));
+    const unprobed = pick(clips).length - todo.length;
+    say(`Clips: ${todo.length} to encode -> ${C.rel(C.CLIPS)} (maximum height ${C.MAX_CLIP_H} px)${unprobed ? `; ${unprobed} unprobed and left out` : ''}`);
+    planList('clip', todo, r => r.filename, r => C.clipPath(r.filename), r => path.join(C.MEDIA, r.filename), r => {
+      const plan = C.clipPlan({ W: +r.width, H: +r.height, maxH: C.MAX_CLIP_H, probe: probes.get(r.filename), realtime: isRealtime(r.filename) });
+      return ` (${plan.ow}x${plan.oh}${plan.slow !== 1 ? ` slow x${plan.slow.toFixed(1)}, ${plan.outDuration.toFixed(1)}s` : ''}${probes.get(r.filename).hdr ? ', HDR->SDR' : ''})`;
+    });
+  } else if (opt.clips && !opt.verifyOnly) {
     const todo = pick(clips).filter(r => probes.has(r.filename));
     // heaviest first so the lanes stay balanced
     const work = r => { const p = probes.get(r.filename); return p.duration * Math.min(p.avgFps, 60) * (+r.width) * (+r.height) * (p.hdr ? 3 : 1); };
@@ -311,7 +350,11 @@ async function main() {
 
   // ---- audio: one AAC file per track of the soundtrack, in play order; nothing when show.json has music off.
   // --only targets media files, so a run with it leaves the tracks alone (they are skipped when present anyway).
-  if (audio.enabled && opt.audio && !opt.verifyOnly && !opt.only.length) {
+  if (audio.enabled && opt.audio && !opt.verifyOnly && !opt.only.length && opt.dryRun) {
+    const tracks = audio.files.map((src, i) => ({ src, k: i + 1 }));
+    say(`Audio: ${tracks.length} track(s) -> ${C.rel(C.AUDIO)} (AAC 192 kbit/s, 48 kHz, stereo, in play order)`);
+    planList('audio', tracks, t => `${t.k}. ${t.src}`, t => C.audioPath(t.k, t.src), t => t.src);
+  } else if (audio.enabled && opt.audio && !opt.verifyOnly && !opt.only.length) {
     fs.mkdirSync(C.AUDIO, { recursive: true });
     say(`Audio: ${audio.files.length} track(s) -> ${C.rel(C.AUDIO)}`);
     const results = [];
@@ -328,6 +371,14 @@ async function main() {
   }
 
   // ---- verify everything that exists, write the manifest
+  if (opt.dryRun) {
+    if (!audio.enabled) say('  audio: off in show.json; no tracks would be made');
+    else if (!opt.audio || opt.verifyOnly || opt.only.length) say('  audio: left alone by this run (--only, --verify-only, --tiles-only or --clips-only)');
+    say(`A real run would then verify every output that exists and write ${C.rel(C.PREP_MANIFEST)}, ` +
+      `${C.rel(path.join(C.BUILD, 'prep-report.txt'))} and ${C.rel(path.join(C.BUILD, 'prep.log'))}.`);
+    finish(t0, null);
+    process.exit(fatal ? 1 : 0);
+  }
   say('Verifying outputs...');
   const manifest = { generatedAt: new Date().toISOString(), maxTileHeight: C.MAX_TILE_H, maxClipHeight: C.MAX_CLIP_H, slowMotion: slowMode, tiles: {}, clips: {}, audio: [] };
   let tileOk = 0, tileBad = 0, tileMissing = 0;
@@ -354,8 +405,9 @@ async function main() {
   say(`  tiles ok ${tileOk} / bad ${tileBad} / missing ${tileMissing}; clips ok ${clipOk} / bad ${clipBad} / missing ${clipMissing}`);
   // the tracks: every one show.json names, in order; an output that is there is probed and recorded, ok or not, so the
   // build and the render can tell a ready soundtrack from a stale one
+  let aBad = 0;
   if (audio.enabled) {
-    let aOk = 0, aBad = 0, aMissing = 0;
+    let aOk = 0, aMissing = 0;
     for (let k = 1; k <= audio.files.length; k++) {
       const src = audio.files[k - 1];
       const v = await verifyAudio(k, src);
@@ -366,7 +418,14 @@ async function main() {
     note(`verified audio ok ${aOk}, bad ${aBad}, missing ${aMissing} of ${audio.files.length} track(s): ${manifest.audio.map(a => `${path.posix.basename(a.path)} ${a.duration.toFixed(1)}s${a.ok ? '' : ' (bad)'}`).join(', ')}`);
     say(`  audio ok ${aOk} / bad ${aBad} / missing ${aMissing}`);
   } else note(C.SHOW ? 'audio: off (show.json audio.enabled false)' : 'audio: off (no show.json)');
-  if ((tileBad || clipBad) && !opt.force) say('  ! existing outputs are kept as they are without --force; run bin/prep --force to remake the bad ones');
+  // an output recorded ok: false is one bin/build refuses to build on, so prep must not end as though the set were ready
+  const bad = tileBad + clipBad + aBad;
+  if (bad) {
+    const what = [tileBad && `${tileBad} tile(s)`, clipBad && `${clipBad} clip(s)`, aBad && `${aBad} track(s)`].filter(Boolean).join(', ');
+    error(`${bad} prepared output(s) failed verification (${what}) and are recorded ok: false in ${C.rel(C.PREP_MANIFEST)}; ` +
+      `bin/build refuses to build on one. Remake them with bin/prep --force` + (aBad ? ' (bin/prep --force --audio-only for the track(s))' : '') +
+      (opt.force ? ', though this run already used --force: look at the WARN lines above for what each one is' : ': without it an output that is already there is kept as it is'));
+  }
   fs.writeFileSync(C.PREP_MANIFEST, JSON.stringify(manifest, null, 1));
   for (const f of failures) note('FAILED ' + f);
   finish(t0, manifest);
@@ -375,8 +434,9 @@ async function main() {
 
 function finish(t0, manifest) {
   const lines = [`prep report ${new Date().toISOString()} (${C.fmtSecs(Date.now() - t0)})`, ...report];
-  fs.writeFileSync(path.join(C.BUILD, 'prep-report.txt'), lines.join('\n') + '\n');
-  say(`Done in ${C.fmtSecs(Date.now() - t0)}. Report: ${C.rel(path.join(C.BUILD, 'prep-report.txt'))}` + (manifest ? `, manifest: ${C.rel(C.PREP_MANIFEST)}` : ''));
+  if (!opt.dryRun) fs.writeFileSync(path.join(C.BUILD, 'prep-report.txt'), lines.join('\n') + '\n');
+  say(opt.dryRun ? `Done in ${C.fmtSecs(Date.now() - t0)}. [dry run] nothing was written.`
+    : `Done in ${C.fmtSecs(Date.now() - t0)}. Report: ${C.rel(path.join(C.BUILD, 'prep-report.txt'))}` + (manifest ? `, manifest: ${C.rel(C.PREP_MANIFEST)}` : ''));
   const bad = report.filter(l => /^(WARN|ERROR|FAILED)/.test(l));
   if (bad.length) say(`${bad.length} warning/error line(s) in the report.`);
   if (logStream) logStream.end();

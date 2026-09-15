@@ -220,7 +220,10 @@ def main(argv: list[str]) -> int:
             exif_datetime_original=it.get("exif_datetime_original", ""),
             people=people.get(it["media_id"], {}).get("people", ""), tag=s.get("tag", "") if s.get("tag") != "companion" else "",
             featured="yes" if s.get("featured") == "yes" else "", video_codec=it.get("video_codec", ""),
-            has_audio=it.get("has_audio", ""), original_source_path=it.get("source_path", "")))
+            has_audio=it.get("has_audio", ""), original_source_path=it.get("source_path", ""),
+            # the caption the build may draw under the tile: the sidecar's description as the index read it.
+            # It is written whatever [taste] captions says, so the owner can edit media.csv before deciding.
+            caption=(it.get("description", "") or "").replace("\n", " ").strip()))
     write_csv(P.handoff / "media.csv", media_rows, MEDIA_COLS)
     write_atomic(P.handoff / "features.txt", "".join(it["filename"] + "\n" for it in sorted(featured, key=lambda r: r["filename"])))
     write_csv(P.handoff / "cut-list.csv", cuts, CUT_COLS)

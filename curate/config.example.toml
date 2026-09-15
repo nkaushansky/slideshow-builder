@@ -41,7 +41,11 @@ hard_stop = 2000-01-01        # last day a finished file may still be produced; 
 first_year = 2000             # scope; defaults to the honoree's birth year
 last_year = 2000              # scope; defaults to the event year
 theme = "whole-life"          # recorded; not read by this version (whole-life | trip | activity | stage | people | traditions, see references/04)
-playback = "loop"             # recorded; play-once is planned
+playback = "loop"             # loop: the file plays on repeat. once: the show plays through and stops on the end card
+title_card = ""               # words held before the mosaic; "" = none. Triple quotes for more than one line, at most 6
+end_card = ""                 # words held after the one pass; only reached when playback = "once"
+card_seconds = 6              # how long each card holds
+card_fade_s = 1               # fade in and out, at most half of card_seconds
 loop_minutes_target = 15      # the loop length the cap is derived from when cap_per_year = 0
 must_include = []             # filenames or media_ids the owner named; select seats them like pins and warns about a miss
 off_limits = []               # filenames, media_ids, or a file or folder path (every file in it); the family's call, the skill
@@ -57,14 +61,17 @@ volume = 1.0                  # 0.0 to 2.0, applied to the soundtrack
 
 [selection]
 lens = "v4"                   # v1 quality | v2 people and motion | v3 breadth | v4 synthesis (recommended)
-cap_per_year = 0              # 0 = derive from [show] loop_minutes_target and the tile size; the first run used 33
+period = "year"               # year | quarter | month: the bucket the cap counts in. A trip wants month
+undated_cap = 0               # how many undated files select --include-undated may seat; 0 = none, as before
+cap_per_year = 0              # the cap per period; 0 = derive it from [show] loop_minutes_target and the tile size
 prorate_partial_years = true  # first year from scope_start or birth_month, last year up to scope_end or event_date
 diversity_distance = 26       # no pick within this perceptual distance of a seated pick
 featured_fraction = 0.1667    # about one in six stills take larger tiles
 featured_min_per_year = 2
 motion_per_month = 1          # one video or Live Photo per month before the general pool
 
-# [selection.cap_overrides]   # a year's cap after pro-rating; keys are years in the scope, values whole numbers
+# [selection.cap_overrides]   # a period's cap after pro-rating; keys are years in the scope, or period keys
+                              # ("2020-Q2", "2020-05"); a year sets every period inside it. Values whole numbers
 # 2020 = 3
 
 [selection.weights]           # the v4 score; each 0 or more, normalised to sum 1 when they do not
@@ -134,7 +141,8 @@ slow_motion = "slow"          # slow | realtime; per-file exceptions in <project
 seed = 20260905               # read only by order = "shuffled": the same seed gives the same shuffled sequence
 videos_silent = true          # recorded; not read by this version (clips are always silent)
 chapters = 0                  # 0 = ten chapters; any other value is used by the build
-captions = "none"             # recorded; not read by this version
+captions = "none"             # none | date (each tile's date at its own precision) | text (the caption column of media.csv,
+                              # which handoff fills from the export's sidecar description)
 
 [machines]
 build_os = ""                 # filled by Step 0

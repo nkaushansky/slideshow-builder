@@ -74,6 +74,29 @@ ORDERS = ("chapters", "chronological", "shuffled")
 MOTION_DENSITY = {"calm": (2, 1), "normal": (4, 2), "busy": (6, 3)}
 LIVE_PHOTO_MODES = ("clip", "still")
 SLOW_MOTION_MODES = ("slow", "realtime")
+PLAYBACK_MODES = ("loop", "once")
+CAPTION_MODES = ("none", "date", "text")
+PERIODS = ("year", "quarter", "month")      # the bucket the cap counts in: a whole life wants years, a trip months
+
+
+def _days_in_month(year: int, month: int) -> int:
+    return calendar.monthrange(year, month)[1]
+
+
+def period_key(date: str, unit: str) -> str:
+    """The period a settled date falls in: "2020", "2020-Q2" or "2020-05". "" when the date has no year."""
+    d = (date or "").strip()
+    if len(d) < 4 or not d[:4].isdigit():
+        return ""
+    y = d[:4]
+    if unit == "year":
+        return y
+    m = int(d[5:7]) if len(d) >= 7 and d[5:7].isdigit() and d[5:7] != "00" else 0
+    if not m:
+        return ""                       # a year-precision file has no quarter or month of its own
+    return f"{y}-{m:02d}" if unit == "month" else f"{y}-Q{(m - 1) // 3 + 1}"
+CARD_MAX_LINES = 6          # a card is a few words on a screen, not a paragraph: the build draws them centred
+CARD_MAX_CHARS = 200
 DEFAULT_SEED = 20260905
 AUDIO_EXT = (".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus")   # by extension only; ffmpeg decodes at prep
 DEFAULT_LOOP_MINUTES = 15
@@ -256,6 +279,72 @@ class Project:
                               f"scope_start/scope_end, first_year/last_year, event_date or [honoree] birth_year)")
         return first, last
 
+    def period_unit(self) -> str:
+        """[selection] period: the bucket the cap counts in. "year" is 0.3's behaviour, number for number."""
+        return _choice_setting("selection", "period", self.get("selection", "period"), "year", PERIODS)
+
+    def period_shares(self) -> dict[str, float]:
+        """Every period in the scope and its share of a whole one, in play order.
+
+        With period = "year" this is year_shares() with the years as strings, so nothing moves. With "quarter" or
+        "month" the scope's own first and last periods are pro-rated the same way: by the months they hold, or by
+        the days when the unit is a month. A scope known only to the year opens in January and closes in December,
+        as it always has.
+        """
+        unit = self.period_unit()
+        if unit == "year":
+            return {str(y): sh for y, sh in self.year_shares().items()}
+        first, last = self.scope_years()
+        start_m, end_m = 1, 12
+        prorate = bool(self.get("selection", "prorate_partial_years", True))
+        s, e = self.scope_start, self.scope_end
+        if prorate:
+            by, ev = self._year("honoree", "birth_year"), self.event_date
+            if s:
+                start_m = s.month
+            elif by == first:
+                start_m = _int_setting("honoree", "birth_month", self.get("honoree", "birth_month"), 1, 1, 12)
+            if e:
+                end_m = e.month
+            elif ev and ev.year == last:
+                end_m = ev.month
+        lo, hi = (first, start_m), (last, end_m)
+        shares: dict[str, float] = {}
+        for y in range(first, last + 1):
+            for m in range(1, 13):
+                if (y, m) < lo or (y, m) > hi:
+                    continue
+                key = f"{y}-{m:02d}" if unit == "month" else f"{y}-Q{(m - 1) // 3 + 1}"
+                share = 1.0
+                if unit == "month" and prorate:
+                    days = _days_in_month(y, m)
+                    d0 = s.day if (s and (y, m) == (s.year, s.month)) else 1
+                    d1 = e.day if (e and (y, m) == (e.year, e.month)) else days
+                    share = max(1, d1 - d0 + 1) / days
+                shares[key] = shares.get(key, 0.0) + (share if unit == "month" else 1 / 3)
+        if unit == "quarter":                      # a quarter's share is the months of it that are in scope
+            shares = {k: round(v, 6) for k, v in shares.items()}
+        return shares
+
+    def undated_cap(self) -> int:
+        """[selection] undated_cap: how many undated files may be seated with --include-undated.
+
+        Absent or blank means 0, which is what 0.3 did: undated files could compete but had no budget of their
+        own, so none was ever seated. A number gives them a bucket of that size; they never borrow a dated
+        period's cap, because a file with no date cannot be spread across the show.
+        """
+        raw = self.get("selection", "undated_cap")
+        if raw is None or raw == "":
+            return 0
+        return int(_int_setting("selection", "undated_cap", raw, 0, 0, None))
+
+    def period_caps(self, plan: dict[str, Any] | None = None) -> dict[str, int]:
+        """Moments per period: the plan's cap pro-rated by each period's share, then the overrides last."""
+        cap = int((plan or self.cap_plan())["cap"])
+        caps = {k: (cap if share >= 1 else max(1, round(cap * share))) for k, share in self.period_shares().items()}
+        caps.update(self.cap_overrides(periods=list(caps)))
+        return caps
+
     def year_shares(self) -> dict[int, float]:
         """Each scope year's share of a full year: 1.0, or months/12 for a partial first or last year.
 
@@ -283,35 +372,67 @@ class Project:
             shares[y] = max(1, hi - lo + 1) / 12
         return shares
 
-    def cap_overrides(self) -> dict[int, int]:
-        """[selection.cap_overrides]: {year: cap}; every key a year in the scope, every value a whole number."""
+    def cap_overrides(self, periods: list[str] | None = None) -> dict:
+        """[selection.cap_overrides]: a cap for named periods, applied after the pro-rating.
+
+        A key is a year ("2020") or a period key ("2020-Q2", "2020-05"). A year given while the unit is smaller
+        sets every period inside that year, so a config written for years keeps working when the unit changes.
+        With no `periods` the keys come back as years (ints), which is what the year-keyed callers expect.
+        """
         raw = self.get("selection", "cap_overrides")
         if raw is None:
             return {}
         if not isinstance(raw, dict):
-            raise ConfigError("[selection] cap_overrides must be a table of year = cap lines: [selection.cap_overrides] then 2020 = 3")
+            raise ConfigError("[selection] cap_overrides must be a table of period = cap lines: [selection.cap_overrides] then 2020 = 3")
         first, last = self.scope_years()
-        out: dict[int, int] = {}
+        if periods is None:                       # the year-keyed form: every key must be a year in the scope
+            out: dict = {}
+            for k, v in raw.items():
+                ks = str(k).strip()
+                if not ks.isdigit() or not (first <= int(ks) <= last):
+                    raise ConfigError(f"[selection.cap_overrides] {ks} is not a year in the scope {first}-{last}")
+                out[int(ks)] = _int_setting("selection.cap_overrides", ks, v, 0, 0, None)
+            return out
+        known = set(periods)
+        out = {}
         for k, v in raw.items():
             ks = str(k).strip()
-            if not ks.isdigit() or not (first <= int(ks) <= last):
-                raise ConfigError(f"[selection.cap_overrides] {ks} is not a year in the scope {first}-{last}")
-            out[int(ks)] = _int_setting("selection.cap_overrides", ks, v, 0, 0, None)
+            cap = _int_setting("selection.cap_overrides", ks, v, 0, 0, None)
+            if ks in known:
+                out[ks] = cap
+                continue
+            inside = [p for p in periods if p[:4] == ks] if ks.isdigit() else []
+            if not inside:
+                raise ConfigError(f"[selection.cap_overrides] {ks} is not a period in the scope "
+                                  f"({periods[0]} to {periods[-1]}); use a year or one of those keys")
+            for p in inside:
+                out[p] = cap
         return out
 
     def cap_plan(self, show: dict[str, Any] | None = None, warnings: list[str] | None = None) -> dict[str, Any]:
         """The cap per year and where it came from (references/04).
 
-        `[selection] cap_per_year` above 0 is used as given (source "config"). 0 or missing derives
-        it from the loop length: seconds_per_item is the first run's 2.2 s scaled by the tile size
-        (base row height over the medium preset's) and by the scroll speed (the first run's pace at
-        this height over the configured speed); target_items = loop_minutes_target * 60 /
-        seconds_per_item; the cap is that spread over the scope's year-shares (a full year 1.0, a
-        partial one months/12), rounded up, at least 1. `show` is a show_settings() dict when the
-        caller has one, else the display numbers are derived here (warnings go to the list given).
-        Keys: cap, source, loop_minutes_target, seconds_per_item, target_items, year_shares, plus
-        tile_size and scroll_speed for the printed line. Overrides are year_caps()' business.
+        `[selection] cap_per_year` above 0 is used as given (source "config"), and nothing else is
+        read: no `[output]`/`[taste]` numbers and no `[show] loop_minutes_target`, so a project that
+        names its own cap never stops on a key the cap does not depend on (0.2 read neither). The
+        derived keys are then None and cap_line() prints the cap alone.
+
+        0 or missing derives the cap from the loop length: seconds_per_item is the first run's 2.2 s
+        scaled by the tile size (base row height over the medium preset's) and by the scroll speed
+        (the first run's pace at this height over the configured speed); target_items =
+        loop_minutes_target * 60 / seconds_per_item; the cap is that spread over the scope's
+        period-shares ([selection] period: a full year 1.0, a partial one months/12; quarters and months the
+        same way), rounded up, at least 1. `show` is a
+        show_settings() dict when the caller has one, else the display numbers are derived here
+        (warnings go to the list given). Keys: cap, source, loop_minutes_target, seconds_per_item,
+        target_items, year_shares, plus tile_size and scroll_speed for the printed line (every one
+        but cap, source and year_shares None on the "config" path). Overrides are year_caps()'.
         """
+        cap = _int_setting("selection", "cap_per_year", self.get("selection", "cap_per_year"), 0, 0, None)
+        if cap > 0:
+            return {"cap": cap, "source": "config", "loop_minutes_target": None, "seconds_per_item": None,
+                    "target_items": None, "year_shares": round(sum(self.period_shares().values()), 4),
+                    "period": self.period_unit(), "tile_size": None, "scroll_speed": None}
         if show is None:
             show = self._display(warnings if warnings is not None else [])
         o, t = show["output"], show["taste"]
@@ -320,15 +441,11 @@ class Project:
         minutes = _num_setting("show", "loop_minutes_target", self.get("show", "loop_minutes_target"), DEFAULT_LOOP_MINUTES, 0, None)
         if minutes <= 0:
             raise ConfigError(f"[show] loop_minutes_target = {minutes} must be a positive number of minutes")
-        shares = round(sum(self.year_shares().values()), 4)
+        shares = round(sum(self.period_shares().values()), 4)
         target = round(minutes * 60 / spi)
-        cap = _int_setting("selection", "cap_per_year", self.get("selection", "cap_per_year"), 0, 0, None)
-        if cap > 0:
-            source = "config"
-        else:
-            cap, source = max(1, math.ceil(target / shares)), "derived"
-        return {"cap": cap, "source": source, "loop_minutes_target": minutes, "seconds_per_item": round(spi, 3),
-                "target_items": target, "year_shares": shares, "tile_size": t["tile_size"], "scroll_speed": scroll}
+        return {"cap": max(1, math.ceil(target / shares)), "source": "derived", "loop_minutes_target": minutes,
+                "seconds_per_item": round(spi, 3), "target_items": target, "year_shares": shares,
+                "period": self.period_unit(), "tile_size": t["tile_size"], "scroll_speed": scroll}
 
     def year_caps(self, plan: dict[str, Any] | None = None) -> dict[int, int]:
         """Moments per year: the plan's cap (cap_plan(), or the one given), pro-rated by month for
@@ -511,6 +628,48 @@ class Project:
             "seed": _int_setting("taste", "seed", t.get("seed"), DEFAULT_SEED, 0, None),
         }
 
+    def card_text(self, key: str) -> str:
+        """[show] title_card or end_card as the player will draw it: trimmed lines, blanks at the end dropped."""
+        raw = self.get("show", key, "")
+        if raw in (None, False):
+            return ""
+        if not isinstance(raw, str):
+            raise ConfigError(f"[show] {key} = {raw!r} must be text (a card is words on a screen; \"\"\"...\"\"\" spans lines)")
+        lines = [ln.strip() for ln in raw.replace("\r\n", "\n").split("\n")]
+        while lines and not lines[-1]:
+            lines.pop()
+        while lines and not lines[0]:
+            lines.pop(0)
+        if not lines:
+            return ""
+        if len(lines) > CARD_MAX_LINES:
+            raise ConfigError(f"[show] {key} has {len(lines)} lines; a card holds at most {CARD_MAX_LINES}")
+        text = "\n".join(lines)
+        if len(text) > CARD_MAX_CHARS:
+            raise ConfigError(f"[show] {key} is {len(text)} characters; a card holds at most {CARD_MAX_CHARS}")
+        return text
+
+    def playback_settings(self, warnings: list[str] | None = None) -> dict[str, Any]:
+        """[show] playback and the two cards, as show.json carries them (references/02).
+
+        playback "once" plays the show through and stops on the end card; "loop" never ends, so an end card set
+        under it is a warning: the file is played on repeat and the card would land in the middle of the party.
+        """
+        warn = warnings if warnings is not None else []
+        playback = _choice_setting("show", "playback", self.get("show", "playback"), "loop", PLAYBACK_MODES)
+        title, end = self.card_text("title_card"), self.card_text("end_card")
+        seconds = _num_setting("show", "card_seconds", self.get("show", "card_seconds"), 6, 0, None)
+        if (title or end) and seconds <= 0:
+            raise ConfigError("[show] card_seconds must be more than 0 for a card to be seen")
+        fade = _num_setting("show", "card_fade_s", self.get("show", "card_fade_s"), 1, 0, None)
+        if fade > seconds / 2:
+            raise ConfigError(f"[show] card_fade_s = {fmt_num(fade)} is more than half of card_seconds = {fmt_num(seconds)}: "
+                              "a card that fades in and out for longer than it holds is never fully on screen")
+        if end and playback == "loop":
+            warn.append("[show] end_card is set but playback = \"loop\", so the show never reaches it; "
+                        "set playback = \"once\" or clear end_card")
+        return {"playback": playback, "cards": {"title": title, "end": end, "seconds": seconds, "fade_s": fade}}
+
     def audio_settings(self, warnings: list[str] | None = None) -> dict[str, Any]:
         """The [audio] section for show.json (references/02): enabled, files resolved to absolute
         paths (each must exist and carry a known extension), loop, crossfade_s, fade_s, volume.
@@ -617,8 +776,9 @@ class Project:
             warn.append(f"[taste] chapters = {str(chapters_raw).lower()} is the 0.1 spelling; 0 means the build's default of ten chapters")
             chapters_raw = 0
         chapters = _int_setting("taste", "chapters", chapters_raw, 0, 0, None)
-        captions = self.get("taste", "captions", "none")
-        captions = "none" if captions in (None, "", False) else str(captions)
+        captions = self.get("taste", "captions")
+        captions = "none" if captions in (None, "", False) else captions
+        captions = _choice_setting("taste", "captions", captions, "none", CAPTION_MODES)
 
         ev = self.get("show", "event_date")
         if isinstance(ev, _dt.datetime):
@@ -659,7 +819,7 @@ class Project:
             "show": {
                 "event": str(self.get("show", "event", "the event") or "the event"),
                 "event_date": event_date,
-                "playback": str(self.get("show", "playback", "loop") or "loop"),
+                **self.playback_settings(warn),
             },
             "audio": audio,
             "selection": {
@@ -746,12 +906,17 @@ def fmt_num(x: float) -> str:
 
 
 def cap_line(plan: dict[str, Any]) -> str:
-    """The one line about the cap that select, the show stage and `python common.py` print."""
+    """The one line about the cap that select, the show stage and `python common.py` print.
+
+    A cap from the config is printed alone: cap_plan() derives nothing for it, so there is no
+    arithmetic to show and none of the derived keys is read here.
+    """
+    unit = plan.get("period") or "year"
     if plan["source"] == "config":
-        return f"cap: {plan['cap']} per year from config"
-    return (f"cap: derived {plan['cap']} per year from a {fmt_num(plan['loop_minutes_target'])}-minute target at "
+        return f"cap: {plan['cap']} per {unit} from config"
+    return (f"cap: derived {plan['cap']} per {unit} from a {fmt_num(plan['loop_minutes_target'])}-minute target at "
             f"{fmt_num(plan['seconds_per_item'])} s per item ({plan['tile_size']} tiles, {plan['scroll_speed']} px/s): "
-            f"{plan['target_items']} moments over {plan['year_shares']:.1f} year-shares")
+            f"{plan['target_items']} moments over {plan['year_shares']:.1f} {unit}-shares")
 
 
 def plan_of(settings: dict[str, Any]) -> dict[str, Any]:
@@ -959,11 +1124,15 @@ if __name__ == "__main__":
     say("work:", P.work, "| index:", P.index, "| handoff:", P.handoff, "| build:", P.build)
     say("honoree:", P.honoree, "| family:", ", ".join(P.family_names) or "(none)", "| gate:", P.people_gate)
     plan = P.cap_plan()
-    say("years:", P.first_year, "to", P.last_year, "| caps:", P.year_caps(plan))
+    caps = P.period_caps(plan)
+    say("years:", P.first_year, "to", P.last_year, f"| period: {P.period_unit()} ({len(caps)} in scope)")
+    say("caps:", ", ".join(f"{k} {v}" for k, v in list(caps.items())[:12]) + (" ..." if len(caps) > 12 else ""))
     say("cap plan:", cap_line(plan))
-    overrides = P.cap_overrides()
+    overrides = P.cap_overrides(periods=list(caps))
     if overrides:
         say("cap overrides:", ", ".join(f"{y} = {c}" for y, c in sorted(overrides.items())))
+    if P.undated_cap():
+        say("undated cap:", P.undated_cap(), "(with select --include-undated)")
     say("priors:", P.priors())
     say("anchors:", {k: len(v) for k, v in P.anchors().items()}, "| pins:", len(P.pins()), "| must_include:", len(P.must_include()))
     warnings: list[str] = []

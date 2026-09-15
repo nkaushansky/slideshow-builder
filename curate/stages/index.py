@@ -50,7 +50,7 @@ ITEM_COLUMNS = ["media_id", "filename", "original_name", "source_kind", "source_
                 "companion", "width", "height", "duration_s", "fps", "hdr", "video_codec", "has_audio", "bytes",
                 "date", "precision", "date_source", "date_witness", "exif_datetime_original", "container_time",
                 "sidecar_time", "camera_make", "camera_model", "phash", "sharpness", "lat", "lon", "burst_group",
-                "duplicate_of", "pair_stem", "pair_dt_s", "pair_frame_dist", "people_tags"]
+                "duplicate_of", "pair_stem", "pair_dt_s", "pair_frame_dist", "people_tags", "description"]
 
 LOCATIONS = ["work", "work/_burst-duplicates", "work/_duplicates", "work/_quarantine"]
 PAIR_DUR = (1.0, 4.0)
@@ -120,16 +120,25 @@ def folder_year(name: str) -> int | None:
 
 def source_folders(row: dict) -> list[str]:
     """The folders between the source and the file, outermost first, from `source_path`
-    (`<zip or label>!<path>`). A folder source's own name counts as the outermost folder; a
-    zip's name does not, it is not a folder the owner named."""
+    (`<zip or label>!<path>`). The source's own name is not one of them: see source_root_name()."""
     src_path = (row.get("source_path") or "").replace("\\", "/")
     label, sep, rel = src_path.partition("!")
     if not sep:
-        label, rel = "", src_path
-    folders = rel.split("/")[:-1]
-    if label and row.get("source_kind") != "takeout":
-        folders = [label] + folders
-    return folders
+        rel = src_path
+    return rel.split("/")[:-1]
+
+
+def source_root_name(row: dict) -> str:
+    """The name of the folder source the file came from, or "" for a Takeout zip (a zip's name is
+    not a folder the owner named) and for a 0.2 `source_path` that carries no label.
+
+    Only `folder_year_rule` (0.3) looks at it. The two rules that predate the label,
+    `calendar_folder_year_rule` and `filename_month_rule`, read source_folders() alone, so
+    re-indexing an old project under 0.3 cannot move a date they settled.
+    """
+    src_path = (row.get("source_path") or "").replace("\\", "/")
+    label, sep, _ = src_path.partition("!")
+    return label if sep and label and row.get("source_kind") != "takeout" else ""
 
 
 # ---------------------------------------------------------------- probe cache
@@ -212,7 +221,9 @@ def settle_date(row: dict, pr: dict, sidecar: dict | None, priors: dict, tz: Zon
                     why.append(f"owner prior: year {year} named in the path")
             why.append(f"owner prior: month '{m.group(1)}' named in the filename")
     if year is None and priors.get("folder_year_rule", False):
-        for f in reversed(folders):   # the nearest folder first
+        # this rule, and only this one, also sees the source folder's own name, outermost of all
+        root = source_root_name(row)
+        for f in reversed(([root] if root else []) + folders):   # the nearest folder first
             y = folder_year(f)
             if y:
                 year = y
@@ -360,6 +371,8 @@ def main(argv: list[str]) -> int:
         elif pr.get("lat") is not None:
             r["lat"], r["lon"] = pr["lat"], pr["lon"]
         r["people_tags"] = (sc.get("people") or "") if sc else ""
+        # the sidecar's caption, kept for [taste] captions = "text"; one line, since it goes on a tile
+        r["description"] = " ".join(((sc.get("description") or "") if sc else "").split())[:200]
         settle_date(r, pr, sc, priors, tz)
         r["_dt"] = capture_dt(r, pr)
         r["_pr"] = pr
@@ -557,7 +570,8 @@ def main(argv: list[str]) -> int:
     say("  dates by source: " + ", ".join(f"{v} {k}" for k, v in sorted(srcs.items())))
     n_sidecar = sum(1 for r in rows if r["sidecar_time"] or r["people_tags"])
     say(f"  sidecars: {len(sidecar_rows)} rows indexed, {n_sidecar} files matched one, "
-        f"people tags on {sum(1 for r in rows if r['people_tags'])} files")
+        f"people tags on {sum(1 for r in rows if r['people_tags'])} files, "
+        f"captions on {sum(1 for r in rows if r['description'])}")
     say(f"  moved {moved}, renamed {renamed}, rename conflicts {conflicts}")
     say(f"accounting: {len(files)} files on disk = {len(rows)} rows, every file once")
     if errors:

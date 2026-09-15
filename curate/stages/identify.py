@@ -346,6 +346,18 @@ def main(argv: list[str]) -> int:
             f"[family] names: {', '.join(names) if names else '(none)'}")
         if not names:
             say("  ! [family] names is empty in config.toml: no tag can match, every tagged file gets family_present = no")
+        if items and not n_tagged_all:
+            # nothing to read: this pass can only write blank identity columns, and the family gate would refuse them
+            has_column = any("people_tags" in r for r in items)
+            why = ("the export carries none" if has_column else
+                   "items.csv has no people_tags column at all: the index ran before 0.3, so re-run `python curate/run.py index`")
+            say(f"  ! no file in items.csv carries people tags ({why}); every row this pass writes leaves family_present "
+                "blank, so [family] gate = \"family\" cannot run on it. Run identify with the detection models instead "
+                "(they fill the person counts too), or use a gate that needs no tags (\"people\" with the models, or \"none\").")
+        elif not todo and not a.force and any(not (existing.get(r["media_id"], {}).get("family_present") or "").strip() for r in items):
+            n_blank = sum(1 for r in items if not (existing.get(r["media_id"], {}).get("family_present") or "").strip())
+            say(f"  ! every file is already in people.csv, so there is nothing to do, and {n_blank} row(s) still have a "
+                "blank family_present; run `identify --tags-only --force` to refresh the identity columns from the tags")
         if a.dry_run:
             say("dry-run: nothing written")
             return 0

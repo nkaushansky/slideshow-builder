@@ -12,7 +12,10 @@ get the source path chain as a prefix, never a sequence number, so origin stays 
 
 A sidecar is never copied as media: a .json that parses as a Takeout sidecar (photoTakenTime
 present) and every .xmp go into the sidecar index, and .aae files (Apple's edit recipes) are set
-aside; any other .json is copied like every file and cut as unsupported at select. ingest.csv's
+aside; any other .json is copied like every file and cut as unsupported at select. A sidecar whose
+media file cannot be settled -- an .xmp that names no file in its folder or two of them, a .json too
+large to read as a sidecar -- is counted and named with its reason (up to SIDECAR_NAMES_SHOWN of
+them), because a date that reached nothing must not be a number in a total. ingest.csv's
 `source_path` is `<source label>!<path inside the source>` for a folder source and
 `<zip name>!<member path>` for a Takeout zip, one shape, so the index stage looks a file's sidecar
 up the same way for both.
@@ -38,6 +41,7 @@ from stages import _takeout, _xmp  # noqa: E402
 INGEST_COLUMNS = ["media_id", "filename", "source_kind", "source_path", "bytes", "mtime", "verified", "note"]
 CHUNK = 1 << 20
 FLUSH_EVERY = 50
+SIDECAR_NAMES_SHOWN = 8       # sidecars that reached no file are named one by one, up to this many, then counted
 
 
 def slug(s: str) -> str:
@@ -87,12 +91,15 @@ def copy_hashing(src: str, dst: str) -> tuple[int, str]:
 
 # ---------------------------------------------------------------- planning
 
-def plan_folder(src_root: Path, kind: str, source_label: str, tz) -> tuple[list[dict], list[dict], collections.Counter]:
-    """(files to copy, sidecar rows, counts) for one folder source. The counts say what was set
-    aside: `json` and `xmp` sidecars indexed, `aae` files skipped, `xmp_unreadable` files, and
-    `ambiguous` media files that two sidecars claimed (left to neither)."""
+def plan_folder(src_root: Path, kind: str, source_label: str, tz) -> tuple[list[dict], list[dict], collections.Counter, list[str]]:
+    """(files to copy, sidecar rows, counts, lost) for one folder source. The counts say what was
+    set aside: `json` and `xmp` sidecars indexed, `aae` files skipped, `xmp_unreadable` files,
+    `ambiguous` media files that two sidecars claimed (left to neither), `xmp_unresolved` sidecars
+    that reached no file and `json_oversize` ones too large to be read as sidecars. `lost` names
+    each of those last two with its reason, so a dropped date is never only a number in a total."""
     items: list[dict] = []
     rows: list[dict] = []
+    lost: list[str] = []
     counts: collections.Counter = collections.Counter()
     for root, dirs, names in os.walk(src_root):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
@@ -116,14 +123,20 @@ def plan_folder(src_root: Path, kind: str, source_label: str, tz) -> tuple[list[
                 rows.append(r)
                 counts["xmp"] += 1
                 continue
-            if ext == ".json" and os.path.getsize(full) <= _takeout.SIDECAR_MAX_BYTES:
-                r = _takeout.read_sidecar_file(full, rel)
-                if r is not None:
-                    r["source"] = "takeout-json"
-                    rows.append(r)
-                    counts["json"] += 1
-                    continue
-                # any other .json is copied like every file; select cuts it as unsupported
+            if ext == ".json":
+                size = os.path.getsize(full)
+                if size <= _takeout.SIDECAR_MAX_BYTES:
+                    r = _takeout.read_sidecar_file(full, rel)
+                    if r is not None:
+                        r["source"] = "takeout-json"
+                        rows.append(r)
+                        counts["json"] += 1
+                        continue
+                    # any other .json is copied like every file; select cuts it as unsupported
+                else:
+                    counts["json_oversize"] += 1
+                    lost.append(f"sidecar {rel} is {size} bytes, over the {_takeout.SIDECAR_MAX_BYTES}-byte sidecar limit; "
+                                "not read as a sidecar, copied as media and cut as unsupported")
             chain = [source_label] + rel.split("/")[:-1]
             items.append(dict(kind=kind, src=full, zip=None, member=None, rel=f"{source_label}!{rel}", path=rel,
                               name=n, chain=chain, size=os.path.getsize(full), mtime=os.path.getmtime(full)))
@@ -134,9 +147,13 @@ def plan_folder(src_root: Path, kind: str, source_label: str, tz) -> tuple[list[
         for r in rows:
             r["zip"] = source_label
             if r["source"] == "xmp":     # named after the file's stem; a JSON resolves by the Takeout rules in finish_rows
-                r["media_member"] = _xmp.resolve_media_member(r["member"], members_by_folder.get(r["folder"], set()))
+                names = members_by_folder.get(r["folder"], set())
+                r["media_member"] = _xmp.resolve_media_member(r["member"], names)
+                if not r["media_member"]:
+                    counts["xmp_unresolved"] += 1
+                    lost.append(f"sidecar {r['member']}: {_xmp.unresolved_reason(r['member'], names)}")
         counts["ambiguous"] = _takeout.finish_rows(rows, members_by_folder)
-    return items, rows, counts
+    return items, rows, counts, lost
 
 
 def plan_takeout(src_root: Path, source_label: str, sidecar_out: Path, dry: bool) -> tuple[list[dict], list[dict]]:
@@ -239,12 +256,17 @@ def main(argv: list[str]) -> int:
         if s.kind == "takeout":
             its, rows = plan_takeout(s.path, label, sidecar_csv, dry)
         else:
-            its, rows, counts = plan_folder(s.path, s.kind, label, tz)
+            its, rows, counts, lost = plan_folder(s.path, s.kind, label, tz)
             if rows or counts:
                 say(f"  {len(rows)} sidecars beside the files in {s.path.name}: {counts['json']} Takeout JSON, {counts['xmp']} .xmp; "
                     f"{sum(1 for r in rows if r['media_member'])} resolved to a file, "
                     f"{sum(1 for r in rows if r['title_collision'])} title collisions, {counts['ambiguous']} files claimed twice (left unresolved); "
-                    f"{counts['aae']} .aae files skipped, {counts['xmp_unreadable']} .xmp files unreadable")
+                    f"{counts['aae']} .aae files skipped, {counts['xmp_unreadable']} .xmp files unreadable, "
+                    f"{counts['xmp_unresolved']} .xmp files reached no media file, {counts['json_oversize']} .json files too large to read")
+            for line in lost[:SIDECAR_NAMES_SHOWN]:     # a lost date is named, never only counted
+                say(f"  ! {line}")
+            if len(lost) > SIDECAR_NAMES_SHOWN:
+                say(f"  ! ... and {len(lost) - SIDECAR_NAMES_SHOWN} more sidecar(s) that reached no file")
         sidecar_rows.extend(rows)
         say(f"  {len(its)} files, {sum(i['size'] for i in its) / 1e9:.2f} GB in {s.path.name}")
         items.extend(its)

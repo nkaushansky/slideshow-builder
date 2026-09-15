@@ -24,5 +24,12 @@ if not defined VLC (
   pause
   exit /b 1
 )
+REM A show that plays once must not be told to repeat: bin\build writes playback.txt (loop ^| once) into the build
+REM folder; copy it to the stick beside the video. Without it the show loops, as it always has.
+set "REPEAT=--repeat"
+if exist "%~dp0playback.txt" (
+  for /f "usebackq delims=" %%p in ("%~dp0playback.txt") do if /i "%%p"=="once" set "REPEAT="
+)
+if not defined REPEAT echo playback.txt says once: VLC will play the show through and stop.
 taskkill /IM vlc.exe /F >nul 2>&1
-start "" "%VLC%" --fullscreen --repeat --no-osd --no-video-title-show "%FILE%"
+start "" "%VLC%" --fullscreen %REPEAT% --no-osd --no-video-title-show "%FILE%"

@@ -203,3 +203,19 @@ def resolve_media_member(sidecar_member: str, names_in_folder: set[str]) -> str:
     if len(same) > 1 and len(stills) == 1:
         return join(stills[0])
     return ""
+
+
+def unresolved_reason(sidecar_member: str, names_in_folder: set[str]) -> str:
+    """Why resolve_media_member() gave nothing, for the ingest log: the sidecar names no file in
+    its folder, or it names several and none of them is the one still that would take it."""
+    base = os.path.basename(sidecar_member)
+    if not base.lower().endswith(".xmp"):
+        return "the name does not end in .xmp"
+    stem = base[:-4]
+    same = sorted(n for n in names_in_folder
+                  if n.casefold() == stem.casefold() or os.path.splitext(n)[0].casefold() == stem.casefold())
+    if not same:
+        folder = os.path.dirname(sidecar_member)
+        return f"no file named {stem} or with that stem in {folder or 'the source root'}"
+    shown = ", ".join(same[:4]) + (", ..." if len(same) > 4 else "")
+    return f"matches {len(same)} files ({shown}) and no single still among them; left to neither"

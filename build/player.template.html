@@ -22,12 +22,19 @@
   .tile img, .tile video { display: block; width: 100%; height: 100%; object-fit: cover; }
   .label { position: absolute; left: 0; bottom: 0; max-width: 100%; padding: var(--label-pad, 6px 10px); font-family: -apple-system, Helvetica, sans-serif; font-weight: 600; font-size: var(--label-px, 19px); line-height: 1.25; color: #fff; background: rgba(0,0,0,.62); white-space: pre; pointer-events: none; }
   .rowtag { position: absolute; left: 0; top: 0; padding: var(--rowtag-pad, 4px 10px); font-family: -apple-system, Helvetica, sans-serif; font-weight: 700; font-size: var(--rowtag-px, 22px); line-height: 1.2; color: #ffd; background: rgba(120,40,0,.75); pointer-events: none; }
+  .caption { position: absolute; left: 0; bottom: 0; max-width: 100%; box-sizing: border-box; padding: var(--cap-pad, 5px 10px); font-family: -apple-system, Helvetica, sans-serif; font-weight: 600; font-size: var(--cap-px, 22px); line-height: 1.25; color: #fff; background: rgba(0,0,0,.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  .caption.above { bottom: auto; top: 0; }   /* the review label owns the bottom of the tile */
+  /* the card layer: the show's own background, the lines centred, sized with the screen. Opacity is set from the script. */
+  #card { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; opacity: 0; z-index: 8; background: #07070F; }
+  body.card #card { display: flex; }
+  #cardText { font-family: -apple-system, Helvetica, sans-serif; font-weight: 700; font-size: var(--card-px, 76px); line-height: 1.3; color: #fff; white-space: pre-line; padding: 0 6vw; }
   #hud { position: fixed; left: 24px; bottom: 20px; font: 22px/1.3 -apple-system, Helvetica, sans-serif; color: #ddd; background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .4s; pointer-events: none; white-space: pre; }
 </style>
 </head>
 <body>
 <div id="stage"></div>
 <div id="hud"></div>
+<div id="card"><div id="cardText"></div></div>
 <div id="flags"><h3>Flagged for swap (<span id="nflags">0</span>)</h3><button id="copyFlags">Copy list</button><button id="dlFlags">Download flags.txt</button><button id="clearFlags">Clear</button><ol id="flagList"></ol><div class="hint">Click a tile to flag or unflag it. Shift-click adds a note (cut / start later / out of order…). Space pauses, F fullscreen. The list is kept in this browser between runs; download it and run <code>bin/candidates $(cut -f1 ~/Downloads/flags.txt)</code> for replacement ideas.</div></div>
 <script>
 /*__MANIFEST__*/
@@ -46,6 +53,10 @@
   const RENDER = params.get('render') === '1';
   const REVIEW = params.get('review') === '1' || window.__FORCE_REVIEW === true;   // review aid: click tiles to flag them, list + export
   const LABELS = params.get('labels') === '1' || REVIEW;   // review aid: filename/date on every tile, row + chapter per row
+  const CARD_ONLY = ['title', 'end'].includes(params.get('card')) ? params.get('card') : '';  // bin/render screenshots the card alone
+  const CARDS = M.cards || { title: '', end: '', seconds: 6, fade_s: 1 };
+  const PLAYBACK = M.playback === 'once' ? 'once' : 'loop';
+  const CAPTIONS = ['date', 'text'].includes(CFG.captions) ? CFG.captions : 'none';
   const START_T = parseStart(params.get('t'));          // review aid: start the live player at this time, e.g. t=3m10s or t=190
   const HOLD = CFG.livePhotoHold, CAP = CFG.movingCap, FPS = CFG.frameFps;
   const MARGIN = RENDER ? 900 : 700;            // rows are created this far outside the viewport so media is ready
@@ -61,9 +72,23 @@
   const LBL = { px: scaled(19), padX: scaled(10), padY: scaled(6), tagPx: scaled(22), tagPadX: scaled(10), tagPadY: scaled(4) };
   { const rs = document.documentElement.style;
     rs.setProperty('--label-px', LBL.px + 'px'); rs.setProperty('--label-pad', `${LBL.padY}px ${LBL.padX}px`);
-    rs.setProperty('--rowtag-px', LBL.tagPx + 'px'); rs.setProperty('--rowtag-pad', `${LBL.tagPadY}px ${LBL.tagPadX}px`); }
+    rs.setProperty('--rowtag-px', LBL.tagPx + 'px'); rs.setProperty('--rowtag-pad', `${LBL.tagPadY}px ${LBL.tagPadX}px`);
+    rs.setProperty('--cap-px', scaled(22) + 'px'); rs.setProperty('--cap-pad', `${scaled(5)}px ${scaled(10)}px`);
+    rs.setProperty('--card-px', scaled(96) + 'px'); }
+  document.getElementById('card').style.background = CFG.background;
   // label text, shared by the DOM labels (live/review) and the ones drawn into render frames (?labels=1)
   const tileLabel = it => `${it.id}\n${it.date} · ${it.kind}${it.featured ? ' · featured' : ''}${it.slow && it.slow !== 1 ? ' · slow-mo' : ''}`;
+  // the owner's caption under a tile: the date at the file's own precision, or the text the index carried from the sidecar
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  function prettyDate(date, precision) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || '');
+    if (!m) return date || '';
+    const y = m[1], mo = Number(m[2]), d = Number(m[3]);
+    if (precision === 'year' || !mo) return y;
+    if (precision === 'month' || !d) return `${MONTHS[mo - 1]} ${y}`;
+    return `${MONTHS[mo - 1]} ${d}, ${y}`;
+  }
+  const captionText = it => (CAPTIONS === 'date' ? prettyDate(it.date, it.precision) : CAPTIONS === 'text' ? (it.caption || '') : '');
   const rowLabel = r => `row ${r.i} · chapter ${r.chapter + 1} · ${r.type} · t=${fmtT((r.y - VH) / speed)}`;
 
   // ---------- state ----------
@@ -115,6 +140,7 @@
         tl.media = v; d.appendChild(v);
       }
       if (REVIEW && flags[tl.it.id]) d.classList.add('flagged');
+      if (CAPTIONS !== 'none') { const cp = captionText(tl.it); if (cp) { const ce = document.createElement('div'); ce.className = 'caption' + (LABELS ? ' above' : ''); ce.textContent = cp; d.appendChild(ce); } }
       if (LABELS) { const lb = document.createElement('div'); lb.className = 'label'; lb.textContent = tileLabel(tl.it); d.appendChild(lb); }
       tl.el = d; el.appendChild(d);
     }
@@ -488,19 +514,64 @@
     syncMusic();
   });
   addEventListener('click', syncMusic);
+  // ---------- cards ----------
+  // The rendered video gets its cards as their own segments (bin/render screenshots ?card=title and ?card=end and
+  // encodes them around the loop), so the loop's frames stay exactly what they were and the wrap proof still holds.
+  // The live player draws the same cards itself: the title holds before the scroll, and with playback = "once" the
+  // scroll stops after one loop and the end card holds. Under playback = "loop" the show never ends, so no end card.
+  const cardEl = document.getElementById('card'), cardText = document.getElementById('cardText');
+  const cardSeconds = Number(CARDS.seconds) > 0 ? Number(CARDS.seconds) : 6;
+  const cardFade = Math.max(0, Math.min(Number(CARDS.fade_s) || 0, cardSeconds / 2));
+  const hasTitle = !!String(CARDS.title || '').trim(), hasEnd = !!String(CARDS.end || '').trim();
+  const loopSeconds = () => L / speed;   // a function: the speed keys change it under the owner's hands
+  function showCard(which, opacity) {
+    cardText.textContent = String(which === 'end' ? CARDS.end : CARDS.title).replace(/\s+$/, '');
+    document.body.classList.add('card'); cardEl.style.opacity = String(opacity);
+  }
+  function hideCard() { document.body.classList.remove('card'); cardEl.style.opacity = '0'; }
+  // opacity of a card that holds for cardSeconds: in over cardFade, out over cardFade. An end card never fades out.
+  const cardOpacity = (age, hold) => cardFade <= 0 ? 1 : Math.max(0, Math.min(1, Math.min(age / cardFade, hold ? 1 : (cardSeconds - age) / cardFade)));
+  // live phases: title (the card holds, the clock waits), show (0.3's behaviour), end (playback = "once", frozen)
+  let phase = (!RENDER && !REVIEW && hasTitle) ? 'title' : 'show';
+  let cardT = 0;
+
   let lastReal = performance.now();
-  if (START_T > 0) { t = START_T; scrollPos = speed * START_T; }
+  if (START_T > 0) { t = START_T; scrollPos = speed * START_T; phase = 'show'; }
   function step(now) {
     if (LABELS) { hud.style.opacity = 1; hud.textContent = `t=${fmtT(t)}  ${speed} px/s  loop ${fmtT(L / speed)}` + (musicHint ? '\nmusic: press any key' : ''); }
     else if (musicHint && !showHudUntil) { hud.textContent = 'music: press any key'; hud.style.opacity = 1; }
     const dt = Math.min(0.1, (now - lastReal) / 1000); lastReal = now;
-    if (!paused) update(t + dt);
+    if (phase === 'title') {
+      if (!paused) cardT += dt;
+      showCard('title', cardOpacity(cardT, false));
+      if (cardT >= cardSeconds) { hideCard(); phase = 'show'; cardT = 0; }
+    } else if (phase === 'end') {
+      cardT += dt;
+      showCard('end', cardOpacity(cardT, true));
+      if (music && musicOn && cardT >= cardFade) music.pause();   // the music stops with the show
+    } else {
+      if (!paused) update(t + dt);
+      // playback = "once": one loop, then the end card (or a frozen last frame when there is no card)
+      if (PLAYBACK === 'once' && !RENDER && !REVIEW && t >= loopSeconds()) {
+        t = loopSeconds(); paused = true;
+        if (hasEnd) { phase = 'end'; cardT = 0; } else flash('the end');
+      }
+    }
     if (showHudUntil && now > showHudUntil) { hud.style.opacity = 0; showHudUntil = 0; }
     requestAnimationFrame(step);
   }
-  update(t);
-  syncMusic();                          // with autoplay allowed the music starts now; otherwise the HUD asks for a key
-  requestAnimationFrame(step);
+  if (CARD_ONLY) {
+    // bin/render's screenshot path: the card alone, at full opacity, nothing else on the page
+    showCard(CARD_ONLY, 1);
+    hud.style.opacity = 0; stage.style.display = 'none';
+    const settle = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();
+    settle.then(() => requestAnimationFrame(() => { window.__cardReady = true; }));
+  } else {
+    if (phase === 'title') showCard('title', 0);
+    update(t);
+    syncMusic();                        // with autoplay allowed the music starts now; otherwise the HUD asks for a key
+    requestAnimationFrame(step);
+  }
 })();
 </script>
 </body>

@@ -40,7 +40,7 @@ SELECTION_COLS = ["media_id", "filename", "selected", "v1_rank", "v2_rank", "v3_
 CUT_COLS = ["media_id", "filename", "location", "reason", "original_source_path"]
 MEDIA_COLS = ["media_id", "filename", "type", "companion", "width", "height", "duration_s", "fps", "hdr", "date",
               "precision", "date_source", "date_witness", "exif_datetime_original", "people", "tag", "featured",
-              "video_codec", "has_audio", "original_source_path"]
+              "video_codec", "has_audio", "original_source_path", "caption"]
 
 MOTION_TYPES = {"video", "animated-gif"}
 STILL_TYPES = {"still", "livephoto-still"}

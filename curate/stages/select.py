@@ -37,10 +37,11 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import DATE_PREFIX_LEN, cap_line, fmt_num, project, say  # noqa: E402
+from common import DATE_PREFIX_LEN, cap_line, fmt_num, period_key, project, say  # noqa: E402
 from stages._lenses import (CUT_COLS, SELECTION_COLS, STILL_TYPES, choose_featured, inum, km, lens_v1,  # noqa: E402
                             lens_v2, lens_v3, lens_v4, make_candidate, pscore, read_csv, write_csv)
 
+UNDATED_KEY = "undated"          # the bucket undated candidates compete in, sorted last by its name
 CUT_REASONS = ("off-limits", "over-cap", "no-family", "no-people", "undated", "unsupported", "excluded-type", "superseded",
                "burst", "duplicate", "flagged")
 _DATE_PREFIXED = re.compile(r"^\d{4}-\d{2}-\d{2}_")
@@ -133,7 +134,8 @@ def main(argv: list[str]) -> int:
     rules = P.featured_rules()
     for w in config_warnings:
         say("  !", w)
-    caps = P.year_caps(plan)
+    unit = P.period_unit()
+    caps = P.period_caps(plan)          # keyed by period: "2020", "2020-Q2" or "2020-05"
     overrides = P.cap_overrides()
     lp_still = knobs["live_photos"] == "still"
     no_featured = ""
@@ -145,9 +147,27 @@ def main(argv: list[str]) -> int:
         have_identity = people is not None and any((r.get("family_present") or "") == "yes" for r in people.values())
         if not have_identity:
             if not a.allow_presence_gate:
-                say("select: the config asks for the family gate ([family] gate = \"family\") but people.csv carries no "
-                    "family_present values (the identity gate is a later milestone). Re-run with --allow-presence-gate "
-                    "to use presence (any person in frame) instead, or set gate = \"people\" in config.toml.")
+                n_valued = sum(1 for r in people.values() if (r.get("family_present") or "").strip()) if people else 0
+                if n_valued:
+                    # identify ran and answered: no file shows one of the names, so the gate would seat nothing
+                    say(f"select: the config asks for the family gate ([family] gate = \"family\") and people.csv answers "
+                        f"family_present on {n_valued} row(s), but none of them says yes: no file's people tags match "
+                        "[family] names. Check the names against the tags in items.csv (people_tags), run identify again "
+                        "after fixing them, or use --allow-presence-gate (any person in frame) or gate = \"people\"/\"none\".")
+                else:
+                    say("select: the config asks for the family gate ([family] gate = \"family\") but people.csv carries no "
+                        "family_present values. Run identify on an index that carries people_tags "
+                        "(`python curate/run.py identify --tags-only`, with --force to refresh rows already in people.csv), "
+                        "or, when the export has no people tags at all, run identify with the detection models. Failing "
+                        "that, re-run with --allow-presence-gate to use presence (any person in frame) instead, or set "
+                        "gate = \"people\" in config.toml.")
+                return 2
+            # presence needs person counts, which a tags-only identify never wrote: say so here rather than
+            # announce the fallback and then refuse it one line later
+            if not (people and any(str(r.get("persons", "")).strip() for r in people.values())):
+                say("select: --allow-presence-gate cannot help here: people.csv carries no person counts either, "
+                    "because identify ran with --tags-only and a tags pass fills none. Run `python curate/run.py "
+                    "identify --force` with the detection models from Step 0, or set [family] gate = \"none\".")
                 return 2
             say("select: family gate requested but no identities available; using the presence gate (--allow-presence-gate)")
             gate = "people"
@@ -204,8 +224,9 @@ def main(argv: list[str]) -> int:
         if not (r.get("precision") or "").strip() and not a.include_undated:
             reason[mid] = "undated"
             continue
-        year = inum((r.get("date") or "")[:4])
-        if year and year not in caps:
+        pk = period_key(r.get("date") or "", unit)
+        if (r.get("date") or "")[:4].isdigit() and pk not in caps:
+            # dated, but outside the scope, or too coarse for the unit (a year-precision file under period = "month")
             reason[mid] = "over-cap"
             out_of_scope += 1
             continue
@@ -227,9 +248,13 @@ def main(argv: list[str]) -> int:
                 continue
         candidates.append(make_candidate(r, p, live_as_still=lp_still))
 
-    byyear: dict[int, list[dict]] = collections.defaultdict(list)
+    # undated files (--include-undated) get a bucket of their own, never a dated period's cap
+    undated_cap = P.undated_cap()
+    byyear: dict[str, list[dict]] = collections.defaultdict(list)   # by period key, in play order
     for c in candidates:
-        byyear[c["year"]].append(c)
+        byyear[period_key(c["date"], unit) or UNDATED_KEY].append(c)
+    if UNDATED_KEY in byyear:
+        caps[UNDATED_KEY] = undated_cap
 
     # ---- anchors and pins from the config
     anchors: dict[str, list[str]] = collections.defaultdict(list)
@@ -371,13 +396,16 @@ def main(argv: list[str]) -> int:
     if unknown_people:
         say(f"  ! {unknown_people} candidate(s) have no people data and passed the gate unchecked")
     if out_of_scope:
-        say(f"  {out_of_scope} dated file(s) outside {P.first_year}-{P.last_year} cut as over-cap")
-    say("  year   cap  cand   sel  motion  feat")
+        say(f"  {out_of_scope} dated file(s) outside {P.first_year}-{P.last_year}"
+            + (f", or too coarsely dated for period = \"{unit}\"" if unit != "year" else "") + ", cut as over-cap")
+    if unit != "year":
+        say(f"  period {unit}: {len(caps)} buckets, each with its own cap")
+    say(f"  {('period' if unit != 'year' else 'year'):7s} cap  cand   sel  motion  feat")
     for y in sorted(byyear):
         L = byyear[y]
         sel_y = [c for c in L if c["id"] in chosen]
-        say("  %4d  %4d  %4d  %4d  %6d  %4d" % (y, caps.get(y, 0), len(L), len(sel_y),
-                                               sum(1 for c in sel_y if c["motion"]), sum(1 for c in sel_y if c["id"] in featured)))
+        say("  %-7s %4d  %4d  %4d  %6d  %4d" % (y, caps.get(y, 0), len(L), len(sel_y),
+                                                sum(1 for c in sel_y if c["motion"]), sum(1 for c in sel_y if c["id"] in featured)))
     reasons = collections.Counter(r["reason"] for r in cut_rows)
     say("  cut reasons:", ", ".join(f"{k} {v}" for k, v in sorted(reasons.items())))
     say(f"  off-limits {reasons.get('off-limits', 0)} ([show] off_limits resolves to {len(off['media_ids'])} media id(s) and "
@@ -401,9 +429,14 @@ def main(argv: list[str]) -> int:
     else:
         say(f"  layout anchors: none (mixed tiles off); standalone videos {n_videos}")
     spi = plan["seconds_per_item"]
-    est = round(n_sel_items * spi)
-    say(f"  rough loop estimate: about {est // 60} min {est % 60:02d} s at {fmt_num(spi)} s per item "
-        f"({plan['tile_size']} tiles, {plan['scroll_speed']} px/s, references/04); the build prints the real number")
+    if spi:
+        est = round(n_sel_items * spi)
+        say(f"  rough loop estimate: about {est // 60} min {est % 60:02d} s at {fmt_num(spi)} s per item "
+            f"({plan['tile_size']} tiles, {plan['scroll_speed']} px/s, references/04); the build prints the real number")
+    else:
+        # the cap came from [selection] cap_per_year, so select read no display settings and has no pace to estimate with
+        say("  rough loop estimate: none here; the cap is [selection] cap_per_year, so select did not read the display "
+            "settings the pace comes from (`python curate/run.py show` prints them); the build prints the real number")
     if not balance:
         say("select: the accounting does not balance; nothing written")
         return 1

@@ -37,6 +37,7 @@ const CONFIG = {
   videoMinRowGap: 2,       // row-index distance between two video rows (2 = never adjacent)
   videoNudge: 12,          // positions a standalone video may move within its chapter to keep video rows apart (videos cluster in 2022-23)
   maxBaseMoving: 2,        // no base row with more than this many moving tiles; show.json taste.max_base_moving: calm 1, normal 2, busy 3
+  captions: 'none',        // show.json taste.captions: none | date (the tile's date at its own precision) | text (the caption column of media.csv)
   mixedTiles: true,        // show.json taste.mixed_tiles; false keeps standalone videos out of the feature rows (the anchors are the featured stills alone)
   wideAloneRatio: 2.4,     // an item wider than this takes a row alone
   minFill: 0.9,            // a base row may stop short of an anchor only when this full (natural width / row width)
@@ -49,6 +50,7 @@ const CONFIG = {
 };
 // handoff/show.json replaces the first-run defaults above before the command line is read, so the flags still win.
 const ORDERS = ['chapters', 'chronological', 'shuffled'];
+const CAPTION_MODES = ['none', 'date', 'text'];
 const SHOW = C.SHOW;
 if (SHOW) {
   const num = (section, key) => {
@@ -81,7 +83,20 @@ if (SHOW) {
     if (typeof SHOW.taste.mixed_tiles !== 'boolean') throw new Error(`${C.rel(C.SHOW_JSON)}: taste.mixed_tiles ${JSON.stringify(SHOW.taste.mixed_tiles)} is not true or false; run python curate/run.py show`);
     CONFIG.mixedTiles = SHOW.taste.mixed_tiles;
   }
+  if (SHOW.taste.captions != null) {
+    if (!CAPTION_MODES.includes(SHOW.taste.captions)) throw new Error(`${C.rel(C.SHOW_JSON)}: taste.captions ${JSON.stringify(SHOW.taste.captions)} is not one of ${CAPTION_MODES.join(' | ')}; run python curate/run.py show`);
+    CONFIG.captions = SHOW.taste.captions;
+  }
 }
+// playback and the cards: the player holds the title before the scroll and, when the show plays once, the end card
+// after it; bin/render encodes the same cards as their own segments around the loop (references/06)
+const SHOWN = (SHOW && SHOW.show) || {};
+const PLAYBACK = SHOWN.playback === 'once' ? 'once' : 'loop';
+const CARDS = (() => {
+  const c = SHOWN.cards || {};
+  const text = v => String(v == null ? '' : v).replace(/\s+$/, '');
+  return { title: text(c.title), end: text(c.end), seconds: Number(c.seconds) > 0 ? Number(c.seconds) : 6, fade_s: Number(c.fade_s) >= 0 ? Number(c.fade_s) : 1 };
+})();
 if (CONFIG.order === 'chronological') CONFIG.chapters = 1;   // one timeline from the first year to the last
 // per-item playback overrides: <project>/overrides.json when it exists, else the repo's build/overrides.json (see overrides.example.json)
 const OVERRIDES_FILE = [C.PROJECT && path.join(C.PROJECT, 'overrides.json'), path.join(__dirname, '..', 'overrides.json')].filter(Boolean).find(p => fs.existsSync(p)) || path.join(__dirname, '..', 'overrides.json');
@@ -126,6 +141,9 @@ function loadItems() {
       (anySlow ? problems : warnings).push(`clips were prepared with slow_motion = ${manifest.slowMotion}, show.json says ${want}; run bin/prep --force${anySlow ? '' : ' (no slow-motion capture in the set, so only the manifest is stale)'}`);
     }
   }
+  if (SHOW && SHOW.taste.mixed_tiles === false && rows.some(r => r.featured === 'yes')) {
+    warnings.unshift(`media.csv still carries ${rows.filter(r => r.featured === 'yes').length} featured row(s) from a selection made with mixed_tiles = true; they take feature rows anyway. Run python curate/run.py select and handoff again to make the set match [taste] mixed_tiles = false`);
+  }
   let overrides = {};
   try { overrides = JSON.parse(fs.readFileSync(OVERRIDES_FILE, 'utf8')).items || {}; } catch (_) { /* none */ }
   const items = [];
@@ -149,7 +167,7 @@ function loadItems() {
       wide: w / h > CONFIG.wideAloneRatio,
       duration, start: +o.start || 0, trimStart: +o.trimStart || 0, trimEnd: +o.trimEnd || 0,
       slow: m && m.slow ? m.slow : 1, hdr: !!(m && m.hdr),
-      date: r.date, precision: r.precision, key: C.dateKey(r.date, r.precision),
+      date: r.date, precision: r.precision, key: C.dateKey(r.date, r.precision), caption: (r.caption || '').trim(),
     });
   }
   return items;
@@ -233,7 +251,8 @@ function featureRow(work, lead) {
   const items = lead ? lead.slice() : [];
   const anchor = work.shift();
   items.push(anchor);
-  let hasVideo = anchor.kind === 'video';
+  // one video to a row. With mixed_tiles = false a video is not an anchor, so it can arrive inside `lead` as well
+  let hasVideo = anchor.kind === 'video' || items.some(it => it.kind === 'video');
   if (anchor.wide) return { type: 'feature', items };
   // pull further anchors from the lookahead window, same chapter only
   for (let k = 0; k < work.length && k < CONFIG.anchorLookahead;) {
@@ -262,7 +281,9 @@ function baseRow(work) {
       // lookahead, then from twice that window; with one or two stray items left, fold them into the feature row
       for (const win of [CONFIG.anchorLookahead, 2 * CONFIG.anchorLookahead, 3 * CONFIG.anchorLookahead]) {
         const k = work.findIndex((d, i) => i > 0 && i <= win && d.chapter === c.chapter && !d.anchor && !d.wide
-          && !(d.moving && movingCount(items) >= CONFIG.maxBaseMoving) && yearOf(d) - yearOf(c) <= CONFIG.pullMaxGap);
+          && !(d.moving && movingCount(items) >= CONFIG.maxBaseMoving)
+          && !(d.kind === 'video' && items.some(it => it.kind === 'video'))   // mixed_tiles = false: a video is a plain item
+          && yearOf(d) - yearOf(c) <= CONFIG.pullMaxGap);
         if (k > 0) { items.push(work.splice(k, 1)[0]); break; }
       }
       if (natural(items, T) < CONFIG.minFill * W) {
@@ -611,7 +632,7 @@ function main() {
   // ---- the soundtrack for the live player: the tracks bin/prep made, only when prep-manifest.json matches show.json
   const audioCfg = C.audioSettings();
   const prepared = C.preparedAudio(C.readPrepManifest());
-  if (audioCfg.enabled && !prepared.enabled) warnings.push(`audio: ${prepared.why}; the live player stays silent (manifest audio.enabled false)`);
+  if (audioCfg.enabled && !prepared.enabled) warnings.unshift(`audio: ${prepared.why}; the live player stays silent (manifest audio.enabled false)`);
   const audio = { enabled: prepared.enabled, files: prepared.tracks.map(t => t.path), loop: audioCfg.loop, volume: audioCfg.volume };
 
   // ---- manifest
@@ -620,11 +641,13 @@ function main() {
     built: new Date().toISOString(), config: CONFIG,
     show: SHOW,                                   // handoff/show.json as read, for the record (null when the build fell back)
     loop: { height: loopHeight, seconds: loopSeconds, frames, speed },
+    playback: PLAYBACK, cards: CARDS,
     audio,                                        // what the live player plays: build-relative m4a paths in play order
     items: items.map(it => ({
       id: it.id, stem: it.stem, kind: it.kind, w: it.w, h: it.h, src: it.src, duration: it.duration,
       start: it.start, trimStart: it.trimStart, trimEnd: it.trimEnd, featured: it.featured, anchor: it.anchor, moving: it.moving,
       chapter: it.chapter, date: it.date, precision: it.precision, slow: it.slow, hdr: it.hdr,
+      caption: CONFIG.captions === 'text' ? it.caption : '',
     })),
     rows: rows.map((r, i) => ({
       i, type: r.type, y: r.y, h: r.h, chapter: r.chapter,
@@ -645,6 +668,8 @@ function main() {
   };
   fs.mkdirSync(C.BUILD, { recursive: true });
   fs.writeFileSync(path.join(C.BUILD, 'manifest.json'), JSON.stringify(manifest));
+  // the launchers read this beside the video: a show that plays once must not be told to repeat
+  fs.writeFileSync(path.join(C.BUILD, 'playback.txt'), PLAYBACK + '\n');
 
   // ---- sequence.txt
   const mark = it => (it.kind === 'video' ? '[V]' : it.kind === 'live' ? '[L]' : it.kind === 'gif' ? '[G]' : '   ') + (it.featured ? '[F]' : '   ');
@@ -696,7 +721,16 @@ function main() {
     jumps.sort((a, b) => b.back - a.back);
     say(`       backward date jumps inside chapters: ${jumps.filter(j => j.back > 1.5).length} over 1.5 yr, ${jumps.length} over 1 yr${jumps.length ? ' (largest: ' + jumps.slice(0, 3).map(j => j.s).join('; ') + ')' : ''}`);
   }
-  say(`       audio: ${audio.enabled ? `${audio.files.length} track(s) for the live player (${audio.files.map(f => path.posix.basename(f)).join(', ')}), ${audio.loop ? 'repeating' : 'once through'}, volume ${audio.volume}` : audioCfg.enabled ? 'not ready, see the warning below' : 'none' + (SHOW ? ' (show.json audio.enabled false)' : '')}`);
+  if (CONFIG.captions !== 'none') {
+    const withCap = items.filter(it => CONFIG.captions === 'date' ? !!it.date : !!it.caption).length;
+    say(`       captions: ${CONFIG.captions}, ${withCap} of ${items.length} tiles`);
+    if (!withCap) warnings.unshift(CONFIG.captions === 'text'
+      ? 'captions = text but no selected file carries one: media.csv\'s caption column is empty everywhere (the export had no descriptions), so no caption will show'
+      : 'captions = date but no selected file carries a date');
+  }
+  say(`       playback: ${PLAYBACK === 'once' ? 'once through' : 'looping'}${CARDS.title ? `, title card ${JSON.stringify(CARDS.title.split('\n')[0])}` : ''}${CARDS.end ? `, end card ${JSON.stringify(CARDS.end.split('\n')[0])}` : ''}${(CARDS.title || CARDS.end) ? ` (${CARDS.seconds}s each, fade ${CARDS.fade_s}s)` : ''}`);
+  if (PLAYBACK === 'loop' && CARDS.end) warnings.unshift('an end card is set but playback is "loop", so the show never reaches it; set [show] playback = "once" or clear [show] end_card');
+  say(`       audio: ${audio.enabled ? `${audio.files.length} track(s) for the live player (${audio.files.map(f => path.posix.basename(f)).join(', ')}), ${audio.loop ? 'repeating' : 'once through'}, volume ${audio.volume}` : audioCfg.enabled ? 'not ready, see the warning below' : 'none' + (SHOW && SHOW.audio ? ' (show.json audio.enabled false)' : SHOW ? ' (this show.json predates [audio]; run python curate/run.py show)' : '')}`);
   say(`       ${playerNote}; manifest.json, sequence.txt written to ${C.rel(C.BUILD)} (${C.fmtSecs(Date.now() - t0)})`);
   const shown = warnings.filter(w => !/no prep output yet/.test(w));
   const missingPrep = warnings.length - shown.length;

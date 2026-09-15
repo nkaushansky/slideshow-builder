@@ -11,6 +11,14 @@ find_show() {   # prints the first slideshow-x*.mp4 (name order) in the folder g
   [ -f "$1/slideshow.mp4" ] && { echo "$1/slideshow.mp4"; return 0; }
   return 1
 }
+# A show that plays once must not be told to repeat. bin/build writes playback.txt (loop | once) into the build
+# folder; copy it to the stick beside the video. Without it the show loops, as it always has.
+repeat_flag() {
+  for d in "$(dirname "$1")" "$DIR" "$DIR/../build"; do
+    [ -f "$d/playback.txt" ] && { [ "$(tr -d " \t\r\n" < "$d/playback.txt")" = "once" ] && echo "" || echo "--repeat"; return 0; }
+  done
+  echo "--repeat"
+}
 FILE="${SLIDESHOW_FILE:-}"
 [ -n "$FILE" ] && [ ! -f "$FILE" ] && FILE=""
 [ -z "$FILE" ] && FILE=$(find_show "$DIR")
@@ -28,4 +36,7 @@ fi
 pkill -x VLC 2>/dev/null; sleep 1
 echo "Playing $FILE"
 echo "Keep this window open (it holds the Mac awake). Esc then Cmd+Q in VLC to stop."
-exec caffeinate -dis "$VLC" --fullscreen --repeat --no-osd --no-video-title-show "$FILE"
+REPEAT=$(repeat_flag "$FILE")
+[ -z "$REPEAT" ] && echo "playback.txt says once: VLC will play the show through and stop."
+# shellcheck disable=SC2086
+exec caffeinate -dis "$VLC" --fullscreen $REPEAT --no-osd --no-video-title-show "$FILE"

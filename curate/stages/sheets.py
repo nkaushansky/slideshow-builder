@@ -303,7 +303,13 @@ def main(argv: list[str]) -> int:
     ffmpeg = _ffmpeg(P)
     if not ffmpeg:
         say("sheets: ffmpeg not found; video tiles get a gray placeholder")
-    caps = P.year_caps()
+    # the sheets stay one per year, which is what an owner reviews in one sitting; with [selection] period
+    # smaller than a year, a year's cap is the sum of the caps of the periods inside it
+    period_caps = P.period_caps()
+    caps: dict[int, int] = {}
+    for key, cap in period_caps.items():
+        if key[:4].isdigit():
+            caps[int(key[:4])] = caps.get(int(key[:4]), 0) + cap
     W = SheetWriter(P, a.thumb, a.cols, ffmpeg, a.force, a.dry_run)
     selected = [r for r in selection if r["selected"] == "yes" and r.get("tag") != "companion" and r["media_id"] in items]
     sel_by_id = {r["media_id"]: r for r in selection}
