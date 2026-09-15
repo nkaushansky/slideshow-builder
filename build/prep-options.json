@@ -1,4 +1,5 @@
 {
-  "_doc": "Per-file prep switches. realtime: clip filenames that should play at real speed even though they were captured at >= 100 fps (default for those is slow motion at 30 fps, like Photos shows them). Re-run bin/prep --force --only <file> after changing.",
-  "realtime": []
+  "_doc": "Per-file slow-motion switches. Looked for as <project>/prep-options.json first, then this file. Clips captured at >= 100 fps play as show.json taste.slow_motion says: \"slow\" (at 30 fps, like Photos shows them; the default) or \"realtime\" (real speed). realtime: filenames that play at real speed although the mode is slow. slow: filenames that stay slow although the mode is realtime. Re-run bin/prep --force --only <file> after changing.",
+  "realtime": [],
+  "slow": []
 }

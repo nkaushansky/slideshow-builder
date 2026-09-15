@@ -17,9 +17,10 @@ Do not skip the intake, do not touch their photos before it is answered, and nev
 
 - A **Claude subscription** (Pro, Max, Team or Enterprise) and **Claude Code** on the machine that holds your photos. The skill runs scripts, so a chat-only setup is not enough. The free plan does not include Claude Code.
 - **Python 3.11 or newer**, **Node.js 20 or newer**, and **Google Chrome** on the build machine. **ffmpeg** too; on Windows the setup step downloads it for you.
-- **VLC** on the machine that will show the slideshow, if it is a different machine.
+- **VLC** on the machine that will show the slideshow, if it is a different machine; or a TV that plays an mp4 from a USB stick; or only Chrome, for the browser player.
 - Free disk space of at least twice the size of your export.
-- Your photos as a **Google Takeout** (best, because its metadata sidecars carry capture times, places and people), an **Apple Photos** export, or a folder tree. Accepted files: JPEG, HEIC/HEIF, PNG and WebP stills; MOV, MP4, M4V, AVI, MKV, MTS/M2TS, 3GP, WebM, WMV and MPEG videos; animated GIFs. Anything else is set aside and listed, never lost.
+- Your photos as a **Google Takeout** (best, because its metadata sidecars carry capture times, places and people; zipped or unzipped), an **Apple Photos** export (File > Export > Export Unmodified Originals, with "Export IPTC as XMP" ticked, so dates, places and the names of people travel with the files), or a folder tree. Accepted files: JPEG, HEIC/HEIF, PNG and WebP stills; MOV, MP4, M4V, AVI, MKV, MTS/M2TS, 3GP, WebM, WMV and MPEG videos; animated GIFs. Anything else is set aside and listed, never lost.
+- Music, if you want it: the files in play order (mp3, m4a, aac, wav, flac, ogg or opus); the render lays them under the video with fades, and they run across the loop seams.
 - Git is optional. You can download the code as a zip instead.
 
 ## Getting started, step by step
@@ -82,7 +83,7 @@ You will be asked to look at things three times, and each one is a real stop:
 2. **The live player**, one round: it opens in Chrome, you click any tile you want swapped, and the swaps go through a change log. If you are not at the machine, a short labelled test render stands in: every tile carries its name and date, so you can name what to swap from the video.
 3. **The final video**, watched once all the way through before the event.
 
-Everything lands in a `project/` folder beside your export: the index, the sheets, the frozen set, the build and the render. The final file is `slideshow-x3.mp4` (three copies of the loop back to back, so the player's own seam comes rarely; the count is a setting); a launcher script next to it plays it fullscreen and looping in VLC. After the event, the runbook in `references/09-runbook.md` says what to delete and what to keep.
+Everything lands in a `project/` folder beside your export: the index, the sheets, the frozen set, the build and the render. The final file is `slideshow-x3.mp4` (three copies of the loop back to back, so the player's own seam comes rarely; the count is a setting); a launcher script next to it plays it fullscreen and looping in VLC. If you gave music, it is on that file, fading in at the start and out at the end, and the launcher plays it at whatever volume the venue sets. For a TV playing from a USB stick, the render picks the H.264 level such sticks decode and warns when the file is too big for a FAT32 stick; for a browser, a second launcher opens the live player in Chrome kiosk mode. After the event, the runbook in `references/09-runbook.md` says what to delete and what to keep.
 
 ### If you would rather hand the setup to Claude
 
@@ -101,7 +102,7 @@ Claude will do steps 2 and 3, tell you what it could not install itself, and the
 | Contact sheets to approve | 74 | about 15, plus alternates on request |
 | Render time for a 15-minute loop | about 100 minutes on 2017-era hardware | depends on your machine |
 
-The loop length is an output, not a setting: it falls out of how many moments you keep and how fast the mosaic scrolls.
+The loop length is an output, not a setting: it falls out of how many moments you keep and how fast the mosaic scrolls. The loop length you ask for at the intake sizes the cut the other way round, at about two seconds per moment at medium tiles.
 
 ## Privacy
 

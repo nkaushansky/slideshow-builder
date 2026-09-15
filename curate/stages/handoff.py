@@ -288,7 +288,10 @@ def main(argv: list[str]) -> int:
          f"- HEIC stills: {heic}. Convert to JPEG during preparation (Pillow with pillow-heif on every platform).",
          f"- HEVC videos: {hevc}. Transcode clips to H.264 for the live player.",
          f"- 10-bit HDR videos: {hdr}. Tone-map to SDR BT.709.",
-         f"- Slow motion (>= 100 fps): {len(slow)}. Play at 30 fps unless the per-file real-time switch says otherwise."
+         f"- Slow motion (>= 100 fps): {len(slow)}. [taste] slow_motion = \"{show['taste']['slow_motion']}\": "
+         + ("played at 30 fps, as the phone shows them, except the files prep-options.json lists under realtime."
+            if show["taste"]["slow_motion"] == "slow" else
+            "played at their real speed, except the files prep-options.json lists under slow.")
          + (" Files: " + ", ".join(r["filename"] for r in slow[:8]) if slow else ""),
          f"- Live Photos played as stills: {len(as_still)}."
          + (" Their clips are cut-list rows (reason excluded-type); the rows in `media.csv` are type still with no companion."

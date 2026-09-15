@@ -7,14 +7,19 @@
 //   4. per frame: page updates to t = k/fps, draws the visible tiles into a canvas, JPEG-encodes it (q 0.95) and sends it over
 //      a WebSocket; we pipe it into ffmpeg (image2pipe -> libx264) and ack once ffmpeg accepted it (backpressure)
 //   5. verify: frame count, size, fps, no audio; wrap check = PSNR between frame 0 and the frame after the last one
+//   6. with music (show.json audio.enabled): the prepared tracks become one playlist, cut to the file's length with the
+//      fades and the volume, and are muxed over the verified render, both streams copied. The render itself then keeps
+//      -silent before .mp4 (slideshow-silent.mp4) and the muxed file takes the plain name the launchers look for.
 // Chromium: [tools] chrome from config.toml, else Playwright's bundled build, else installed Google Chrome (common.launchBrowser).
 // Size and fps come from build/manifest.json (bin/build took them from handoff/show.json); the x264 preset/crf default from
-// show.json's output.quality (final: slow/18, draft: veryfast/23) and the concat copy count from output.concat_copies.
+// show.json's output.quality (final: slow/18, draft: veryfast/23) and the concat copy count from output.concat_copies;
+// [machines] player = "tv-usb" adds an H.264 level for the stick's decoder and warns about files a FAT32 stick refuses.
 // Usage: bin/render [--seconds N] [--from SECONDS] [--out FILE] [--preset slow|medium|...] [--crf N] [--q 0.95] [--skip-frames] [--labels] [--concat] [--warm-loops N]
 //   default renders exactly one loop to build/slideshow.mp4; --seconds 60 is the quick test render; --from 470 --seconds 40
 //   renders a window from inside the loop (the scheduler is stepped up to that point without drawing, so the state is right).
 //   --labels draws the review labels (filename, date, row, chapter) into every frame and names the file -labels, for an owner
-//   who is not at the machine; --concat (alias --x3) also writes slideshow-x<N>.mp4, N copies back to back, for the launchers.
+//   who is not at the machine; --concat (alias --x3) also writes slideshow-x<N>.mp4, N copies back to back, for the launchers
+//   (with music: N silent copies joined, then one soundtrack over the whole file, so the music runs across the seams).
 
 const fs = require('fs');
 const path = require('path');
@@ -29,6 +34,8 @@ const QUALITY = { final: { preset: 'slow', crf: 18 }, draft: { preset: 'veryfast
 const SHOW = C.SHOW;
 const quality = SHOW ? String(SHOW.output.quality) : 'final';
 const concatCopies = SHOW ? SHOW.output.concat_copies : 3;
+const PLAYER = SHOW && SHOW.machines && SHOW.machines.player ? String(SHOW.machines.player) : 'vlc';
+const AUDIO = C.audioSettings();    // a bad [audio] value stops here, before an hour of rendering
 const opt = { seconds: 0, from: 0, out: '', preset: '', crf: null, q: 0.95, skipFrames: false, labels: false, concat: false, jobs: 0, warmLoops: 8 };
 {
   const usage = 'usage: bin/render [--seconds N] [--from SECONDS] [--out FILE] [--preset P] [--crf N] [--q 0.95] [--skip-frames] [--labels] [--concat] [--warm-loops N]';
@@ -99,6 +106,81 @@ function attachWs(sock, onMessage) {
 }
 
 function fmtTime(s) { const m = Math.floor(s / 60); return `${m}m${String(Math.round(s - m * 60)).padStart(2, '0')}s`; }
+const withSuffix = (file, sfx) => { const p = path.parse(file); return path.join(p.dir, p.name + sfx + p.ext); };   // slideshow.mp4 + -silent -> slideshow-silent.mp4
+const GIB = 1024 ** 3;
+
+// ---------- the soundtrack (show.json audio) ----------
+// After the silent render verifies: the prepared tracks (bin/prep, build/audio/NN-<stem>.m4a) are joined once per render
+// into build/audio/playlist.m4a with a crossfade at every junction whose neighbours both outlast crossfade_s, the playlist
+// is cut to the file's length with the volume and the fades applied (repeated when audio.loop is on; otherwise silence
+// follows the last track, so the video is never shortened), and the result is muxed over the silent copy with both streams
+// copied. Every step is probed afterwards; a length that is off by more than half a second is a PROBLEM.
+const AAC = ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart'];
+async function buildPlaylist(tracks) {
+  const out = path.join(C.AUDIO, 'playlist.m4a');
+  const cf = AUDIO.crossfade;
+  const args = ['-hide_banner', '-nostdin', '-v', 'error', '-y'];
+  for (const t of tracks) args.push('-i', t.abs);
+  let expected = tracks.reduce((s, t) => s + t.duration, 0), faded = 0;
+  if (tracks.length === 1) args.push('-map', '0:a:0', '-c:a', 'copy', '-movflags', '+faststart', out);
+  else {
+    // one filter graph: junction i joins the running mix with track i by acrossfade when both neighbours outlast the
+    // crossfade, else by a plain concat (a track shorter than the crossfade has nothing to fade across)
+    const steps = []; let prev = '[0:a]';
+    for (let i = 1; i < tracks.length; i++) {
+      const next = i === tracks.length - 1 ? '[mix]' : `[j${i}]`;
+      if (cf > 0 && tracks[i - 1].duration > cf && tracks[i].duration > cf) { steps.push(`${prev}[${i}:a]acrossfade=d=${cf}${next}`); faded++; expected -= cf; }
+      else steps.push(`${prev}[${i}:a]concat=n=2:v=0:a=1${next}`);
+      prev = next;
+    }
+    args.push('-filter_complex', steps.join(';'), '-map', '[mix]', ...AAC, out);
+  }
+  const r = await C.run(C.FFMPEG, args);
+  if (r.code !== 0) throw new Error(`playlist: ffmpeg failed: ${r.err.trim().split('\n').pop()}`);
+  const p = await C.probeAudio(out);
+  log(`soundtrack: playlist of ${tracks.length} track(s): ${tracks.map(t => `${path.posix.basename(t.path)} ${t.duration.toFixed(1)}s`).join(', ')}; ${faded} crossfade(s) of ${cf}s -> ${C.rel(out)} ${p.duration.toFixed(1)}s`);
+  if (Math.abs(p.duration - expected) > 0.5) throw new Error(`playlist ${C.rel(out)} is ${p.duration.toFixed(2)}s, expected ${expected.toFixed(2)}s`);
+  return { file: out, duration: p.duration };
+}
+async function makeSoundtrack(playlist, D, target) {
+  const out = path.join(C.AUDIO, path.parse(target).name + '.soundtrack.m4a');
+  const F = AUDIO.fade, filters = [`volume=${AUDIO.volume}`];
+  let fadeOutAt = Math.max(0, D - F), early = false;
+  if (!AUDIO.loop && playlist.duration < D) { fadeOutAt = Math.max(0, playlist.duration - F); early = true; }
+  if (F > 0) filters.push(`afade=t=in:st=0:d=${F}`, `afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${F}`);
+  filters.push('apad');   // silence after the music when it ends early, so -t always yields D and -shortest never cuts the video
+  const args = ['-hide_banner', '-nostdin', '-v', 'error', '-y'];
+  if (AUDIO.loop) args.push('-stream_loop', '-1');
+  args.push('-i', playlist.file, '-t', D.toFixed(3), '-af', filters.join(','), ...AAC, out);
+  const r = await C.run(C.FFMPEG, args);
+  if (r.code !== 0) throw new Error(`soundtrack: ffmpeg failed: ${r.err.trim().split('\n').pop()}`);
+  const p = await C.probeAudio(out);
+  log(`soundtrack: ${D.toFixed(3)}s for ${path.basename(target)}: playlist ${AUDIO.loop ? 'repeated' : 'once'}${early ? ` (the music ends early, at ${playlist.duration.toFixed(1)}s of ${D.toFixed(1)}s; silence after)` : ''}, volume ${AUDIO.volume}, ${F > 0 ? `fade in ${F}s from 0s, fade out ${F}s from ${fadeOutAt.toFixed(1)}s` : 'no fades'} -> ${C.rel(out)} ${p.duration.toFixed(3)}s`);
+  if (Math.abs(p.duration - D) > 0.5) throw new Error(`soundtrack ${C.rel(out)} is ${p.duration.toFixed(2)}s, wanted ${D.toFixed(2)}s`);
+  return out;
+}
+// -shortest only guards against an encoder tail of a few milliseconds: the soundtrack is already cut to D. Returns the
+// problems found by probing the result (the muxed file must carry every frame of the silent one and D seconds of AAC).
+async function mux(silent, soundtrack, out, D, framesWanted) {
+  const tmp = out + '.tmp';
+  const r = await C.run(C.FFMPEG, ['-hide_banner', '-nostdin', '-v', 'error', '-y', '-i', silent, '-i', soundtrack, '-map', '0:v:0', '-map', '1:a:0',
+    '-c:v', 'copy', '-c:a', 'copy', '-shortest', '-movflags', '+faststart', '-f', 'mp4', tmp]);
+  if (r.code !== 0 || !fs.existsSync(tmp)) { try { fs.unlinkSync(tmp); } catch (_) { /* nothing to remove */ } throw new Error(`mux: ffmpeg failed: ${r.err.trim().split('\n').pop()}`); }
+  fs.renameSync(tmp, out);
+  const j = await C.ffprobeJson(out);
+  const v = (j.streams || []).find(s => s.codec_type === 'video'), a = (j.streams || []).find(s => s.codec_type === 'audio');
+  const vFrames = v ? Number(v.nb_frames) || 0 : 0, aDur = a ? Number(a.duration) || 0 : 0;
+  log(`mux: ${path.basename(silent)} + soundtrack -> ${C.rel(out)}: video ${v ? v.codec_name : 'NONE'} ${vFrames} frames, audio ${a ? `${a.codec_name} ${a.channels} ch ${a.sample_rate} Hz ${aDur.toFixed(3)}s` : 'NONE'}, ${(fs.statSync(out).size / 1e6).toFixed(1)} MB`);
+  const problems = [];
+  if (!a) problems.push(`${C.rel(out)}: no audio stream after the mux`);
+  else if (Math.abs(aDur - D) > 0.5) problems.push(`${C.rel(out)}: audio ${aDur.toFixed(2)}s differs from ${D.toFixed(2)}s by more than 0.5 s`);
+  if (!v || vFrames !== framesWanted) problems.push(`${C.rel(out)}: ${vFrames} video frames after the mux, expected ${framesWanted}`);
+  return problems;
+}
+function sizeNote(file) {   // tv-usb: a FAT32 stick refuses a file of 4 GiB or more; a warning, never a failure
+  const size = fs.statSync(file).size;
+  if (PLAYER === 'tv-usb' && size >= 4 * GIB) log(`  ! ${C.rel(file)} is ${(size / GIB).toFixed(2)} GiB: FAT32 sticks refuse files of 4 GiB and over; use quality draft, fewer concat copies, or an exFAT stick`);
+}
 
 async function main() {
   const t0 = Date.now();
@@ -107,10 +189,27 @@ async function main() {
   const total = opt.seconds ? Math.round(opt.seconds * fps) : manifest.loop.frames;
   const k0 = Math.round(opt.from * fps);
   const suffix = opt.labels ? '-labels' : '';           // a labelled render is never the file the launchers pick up
-  const out = path.resolve(opt.out || path.join(C.BUILD, opt.seconds ? `test-${opt.from ? opt.from + 's-' : ''}${opt.seconds}s${suffix}.mp4` : `slideshow${suffix}.mp4`));
-  log(`render: ${total} frames at ${fps} fps (${fmtTime(total / fps)})${k0 ? ` from frame ${k0} (t=${fmtTime(k0 / fps)})` : ''} -> ${C.rel(out)}; loop ${manifest.loop.frames} frames = ${fmtTime(manifest.loop.seconds)} at ${manifest.loop.speed.toFixed(3)} px/s; x264 ${opt.preset} crf ${opt.crf} (quality ${quality}${opt.tuned ? ', --preset/--crf given' : ''}), jpeg q ${opt.q}${opt.labels ? '; labels on' : ''}`);
+  const finalOut = path.resolve(opt.out || path.join(C.BUILD, opt.seconds ? `test-${opt.from ? opt.from + 's-' : ''}${opt.seconds}s${suffix}.mp4` : `slideshow${suffix}.mp4`));
+  const out = AUDIO.enabled ? withSuffix(finalOut, '-silent') : finalOut;   // with music the render is the silent copy and the mux writes finalOut
+  log(`render: ${total} frames at ${fps} fps (${fmtTime(total / fps)})${k0 ? ` from frame ${k0} (t=${fmtTime(k0 / fps)})` : ''} -> ${C.rel(out)}${AUDIO.enabled ? ` (silent; the soundtrack goes into ${C.rel(finalOut)})` : ''}; loop ${manifest.loop.frames} frames = ${fmtTime(manifest.loop.seconds)} at ${manifest.loop.speed.toFixed(3)} px/s; x264 ${opt.preset} crf ${opt.crf} (quality ${quality}${opt.tuned ? ', --preset/--crf given' : ''}), jpeg q ${opt.q}${opt.labels ? '; labels on' : ''}`);
   if (!SHOW) log('handoff/show.json missing; quality final (x264 slow, crf 18) and 3 concat copies assumed; run `python curate/run.py show`');
   if (!fs.existsSync(path.join(C.BUILD, 'player.html'))) throw new Error('player.html missing; run bin/build');
+  // the tracks are checked now, so a stale preparation stops the run before the frames, not after them
+  const prepared = C.preparedAudio(C.readPrepManifest());
+  if (AUDIO.enabled && !prepared.enabled) throw new Error(`audio: ${prepared.why}`);
+  if (AUDIO.enabled) {
+    log(`audio: ${prepared.tracks.length} track(s) (${prepared.tracks.map(t => path.posix.basename(t.path)).join(', ')}), ${AUDIO.loop ? 'repeated' : 'once through'}, crossfade ${AUDIO.crossfade}s, fade ${AUDIO.fade}s, volume ${AUDIO.volume}`);
+    if (!(manifest.audio && manifest.audio.enabled)) log('  ! manifest.json has no music for the live player (built before the tracks were prepared?); run bin/build for player.html');
+  }
+  // tv-usb: a TV stick's hardware decoder wants a declared H.264 level; 4.1 covers 1080p30, 4.2 1080p60, 5.1 anything larger
+  const levelArgs = [];
+  if (PLAYER === 'tv-usb') {
+    const w = manifest.config.viewportW, h = manifest.config.viewportH;
+    const hd = Math.max(w, h) <= 1920 && Math.min(w, h) <= 1080;
+    const level = !hd ? '5.1' : fps > 30 ? '4.2' : '4.1';
+    levelArgs.push('-profile:v', 'high', '-level', level);
+    log(`tv-usb: x264 profile high, level ${level} (${w}x${h} at ${fps} fps)`);
+  }
 
   // 1. frames
   if (!opt.skipFrames) {
@@ -151,7 +250,7 @@ async function main() {
   // 3. ffmpeg: JPEG frames in, H.264 out. JPEG is full-range 601; the mp4 gets limited-range BT.709 via RGB.
   const ffArgs = ['-hide_banner', '-nostdin', '-v', 'error', '-y', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', 'pipe:0', '-an',
     '-vf', 'format=rgb24,scale=out_color_matrix=bt709:out_range=tv:flags=accurate_rnd,format=yuv420p',
-    '-c:v', 'libx264', '-preset', opt.preset, '-crf', String(opt.crf), '-pix_fmt', 'yuv420p', '-r', String(fps),
+    '-c:v', 'libx264', '-preset', opt.preset, '-crf', String(opt.crf), ...levelArgs, '-pix_fmt', 'yuv420p', '-r', String(fps),
     '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-x264-params', 'colorprim=bt709:transfer=bt709:colormatrix=bt709',
     '-movflags', '+faststart', out];
   ffmpeg = spawn(C.FFMPEG, ffArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
@@ -225,15 +324,41 @@ async function main() {
   }
   log(`max moving tiles in one frame: ${maxPlaying} (cap ${manifest.config.movingCap}); total ${fmtTime((Date.now() - t0) / 1000)}`);
 
-  // 7. concat: N copies of the loop back to back (show.json output.concat_copies), so the player's own seam lands once
-  //    per N loops; the launchers look for slideshow-x*.mp4 first
+  // 7. the soundtrack: the playlist once per render, then one soundtrack of the file's length muxed over the verified
+  //    silent copy; the muxed file takes the plain name the launchers pick up
+  let playlist = null;
+  if (AUDIO.enabled && !problems.length) {
+    try {
+      fs.mkdirSync(C.AUDIO, { recursive: true });
+      playlist = await buildPlaylist(prepared.tracks);
+      const soundtrack = await makeSoundtrack(playlist, total / fps, finalOut);
+      problems.push(...await mux(out, soundtrack, finalOut, total / fps, total));
+    } catch (e) { problems.push(String(e.message || e)); }
+  }
+  if (!problems.length) sizeNote(finalOut);
+
+  // 8. concat: N copies of the loop back to back (show.json output.concat_copies), so the player's own seam lands once
+  //    per N loops; the launchers look for slideshow-x*.mp4 first. With music the silent copies are joined and one
+  //    soundtrack of N x D runs over the whole file, across the seams; the silent join is only a step on the way
   if (opt.concat && !problems.length) {
     const N = concatCopies;
     const list = path.join(C.BUILD, 'concat-list.txt');
     fs.writeFileSync(list, Array(N).fill(`file '${out.replace(/'/g, "'\\''")}'`).join('\n') + '\n');
-    const xn = out.replace(/\.mp4$/, `-x${N}.mp4`);
-    const r = await C.run(C.FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', xn]);
-    if (r.code !== 0) problems.push('concat failed: ' + r.err.trim()); else log(`concat: ${N} copies -> ${C.rel(xn)} (${(fs.statSync(xn).size / 1e6).toFixed(1)} MB)`);
+    const xnSilent = withSuffix(out, `-x${N}`), xn = withSuffix(finalOut, `-x${N}`);   // slideshow-x3.mp4; with music slideshow-silent-x3.mp4 then slideshow-x3.mp4
+    const r = await C.run(C.FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', xnSilent]);
+    if (r.code !== 0) problems.push('concat failed: ' + r.err.trim());
+    else {
+      log(`concat: ${N} copies of ${path.basename(out)} -> ${C.rel(xnSilent)} (${(fs.statSync(xnSilent).size / 1e6).toFixed(1)} MB)`);
+      if (AUDIO.enabled) {
+        try {
+          const soundtrack = await makeSoundtrack(playlist, N * total / fps, xn);
+          const ps = await mux(xnSilent, soundtrack, xn, N * total / fps, N * total);
+          problems.push(...ps);
+          if (!ps.length) { fs.unlinkSync(xnSilent); log(`concat: ${C.rel(xnSilent)} removed; ${C.rel(xn)} (with the music) is the file the launchers play`); }
+        } catch (e) { problems.push(String(e.message || e)); }
+      }
+      if (!problems.length) sizeNote(xn);
+    }
   }
   fs.writeFileSync(path.join(C.BUILD, 'render-log.txt'), logLines.join('\n') + '\n');
   if (problems.length) { log('PROBLEMS:'); for (const p of problems) log('  X ' + p); process.exit(1); }

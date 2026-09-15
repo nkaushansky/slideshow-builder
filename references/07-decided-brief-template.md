@@ -6,9 +6,9 @@ Fill this into `project/BRIEF.md` after the intake and Step 0, before any buildi
 
 # <event> slideshow: build brief
 
-**State, <date>.** Build machine: <OS, chip, memory>. Display machine: <OS, screen, `[output] resolution` and `fps` as detected or answered, player>. Sources: <what, where, how many files, how many years, sidecars present or not>. Working folder: <path>. Set status: <not yet selected | proposed cut of N moments | frozen at N files / N moments>. Hard stop: <date>. Owner hours budget: <hours>.
+**State, <date>.** Build machine: <OS, chip, memory>. Display machine: <OS, screen, `[output] resolution` and `fps` as detected or answered, player>. Sources: <what, where, how many files, how many years, sidecars present or not>. Scope: <`[show] scope_start` to `scope_end`, or `first_year` to `last_year`>. Working folder: <path>. Set status: <not yet selected | proposed cut of N moments | frozen at N files / N moments>. Hard stop: <date>. Owner hours budget: <hours>.
 
-**One paragraph.** What is being built, where it plays, for whom, how long it runs, and the exact deliverable (an mp4 that loops in VLC; the browser player as fallback).
+**One paragraph.** What is being built, where it plays, for whom, how long it runs, and the exact deliverable (an mp4 that loops in VLC or plays from a stick on a TV, with or without music; the browser player as fallback).
 
 ## Ground rules
 
@@ -38,15 +38,17 @@ Fill this into `project/BRIEF.md` after the intake and Step 0, before any buildi
 | # | Decision | Chosen | Alternatives considered | Decided by | Date |
 |---|---|---|---|---|---|
 | 1 | Format | scrolling mosaic, justified rows | hero singles; static grid; hybrid | owner | |
-| 2 | Ordering | mini-timelines, N chapters, ring | strict chronology; arranged for variety | owner | |
-| 3 | Large tiles | featured stills plus every video, no full-screen singles | heroes; promotion of videos | owner | |
-| 4 | Live Photos | full clip, hold, no bounce, autoplay as the tile | trim and ping-pong; still with hover | owner | |
-| 5 | Videos | feature rows, silent, scroll through, per-file start | full screen; paused scroll | owner | |
+| 2 | Ordering | `[taste] order` <chapters (mini-timelines, N chapters, ring), chronological (one chapter) or shuffled (seed N)> | strict chronology; arranged for variety; a shuffle | owner | |
+| 3 | Large tiles | `[taste] mixed_tiles` <yes: featured stills plus every video, no full-screen singles; no: none, every row a base row> | heroes; promotion of videos; a flat grid | owner | |
+| 4 | Live Photos | `[taste] live_photos` <clip: full clip, hold, no bounce, autoplay as the tile; still: the still alone> | trim and ping-pong; still with hover | owner | |
+| 5 | Videos | included (`[taste] include_videos`, `include_gifs`), feature rows, silent, scroll through, per-file start; slow motion <slow or realtime> | full screen; paused scroll; stills only | owner | |
 | 6 | Captions | none (recorded in `[taste] captions`; this version does not act on it) | baked into tiles | owner | |
-| 7 | Audio | none (recorded in `[show] audio`; music is planned, not in this version) | ambient in the quiet window | owner | |
-| 8 | Output | `[output]`: <resolution> at <fps> fps, quality <final or draft>, mp4 in VLC, ×<concat_copies> concat | live browser | build | |
-| 9 | Loop length | an output; expected <N> min at <speed> px/s (`[taste] scroll_speed`, 0 = the first run's pace scaled to `[output]` height) with <tile_size> tiles | a fixed target | build | |
+| 7 | Audio | <none, or `[audio]`: the files in play order, loop <on or off>, crossfade <s> s, fade <s> s, volume <v>, muxed onto the render> | the DJ's sound; ambient in the quiet window | owner | |
+| 8 | Output | `[output]`: <resolution> at <fps> fps, quality <final or draft>, ×<concat_copies> concat; `[machines] player` <vlc, tv-usb or browser> | live browser | build | |
+| 9 | Loop length | an output of the cap; expected <N> min at <speed> px/s (`[taste] scroll_speed`, 0 = the first run's pace scaled to `[output]` height) with <tile_size> tiles | a fixed target | build | |
 | 10 | Chronology versus spacing | chronology wins; `disorderWeight` <N> | spacing wins | owner | |
+| 11 | Cap source | <derived: N per year from a <M>-minute target (`[show] loop_minutes_target`) at <s> s per item over <Y> year-shares; or config: `[selection] cap_per_year` N>; overrides <`[selection.cap_overrides]` or none> | the other one | owner | |
+| 12 | Motion density | `[taste] motion_density` <calm, normal or busy> (`movingCap` <N>, `maxBaseMoving` <N>) | the other two | owner | |
 
 ## Sequence, layout, motion, render
 
@@ -54,18 +56,18 @@ Copy the relevant sections of `references/06-layout-motion-render.md` and edit t
 
 ## Tuning knobs
 
-The config block with this show's values: `[output]` and `[taste]` from `config.toml` as `python curate/run.py show` derived them (paste the numbers it printed), then the build script's own knobs.
+The config block with this show's values: `[output]`, `[taste]` and `[audio]` from `config.toml` as `python curate/run.py show` derived them, and the cap plan (paste the numbers it printed), then the build script's own knobs.
 
 ## Build order
 
 0. Environment check (`python curate/setup.py --project <folder> --apply`); report.
 1. Verify the handoff; print the invariant.
-2. Prepare tiles, clips, frames.
+2. Prepare tiles, clips, music tracks, frames.
 3. Build the sequence; print counts and share.
 4. Live-player round with the owner (checkpoint 2).
 5. Apply flags through the ledger; rebuild; show the changes.
 6. 60-second test render; window renders around special cases.
-7. Full render; wrap check; `--concat` (×<concat_copies>); soak.
+7. Full render; wrap check; the soundtrack muxed on when there is music; `--concat` (×<concat_copies>); soak.
 8. Launcher; backup; the owner's full watch (checkpoint 3).
 9. Additions cutoff: <date, evening>. Final render that night. Hard stop: <date>.
 
@@ -79,7 +81,7 @@ How a swap, a drop and a redate are applied; where candidates come from; that on
 
 ## What this is not
 
-Not a gallery, not interactive, not chronological end to end, not captioned, not scored. No hero slides, no pausing on single images. <edit to taste>
+Not a gallery, not interactive, not chronological end to end (unless `[taste] order` says so), not captioned, silent unless `[audio]` says otherwise. No hero slides, no pausing on single images. <edit to taste>
 
 ## Changelog
 

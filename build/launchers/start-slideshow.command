@@ -1,7 +1,8 @@
 #!/bin/sh
 # Slideshow launcher for macOS. Double-click to start.
-# Opens VLC fullscreen on the rendered file, looping, no OSD, no audio, and keeps the Mac awake for as
-# long as this window is open. LEAVE THIS TERMINAL WINDOW OPEN. To stop: press Esc in VLC, then Cmd+Q.
+# Opens VLC fullscreen on the rendered file, looping, no OSD, sound on (a silent render plays nothing; a render with
+# music plays it, so set the venue's volume first), and keeps the Mac awake for as long as this window is open.
+# LEAVE THIS TERMINAL WINDOW OPEN. To stop: press Esc in VLC, then Cmd+Q.
 #
 # Where the file comes from, in order: $SLIDESHOW_FILE if set; next to this script; <project>/build when this script
 # sits in the project's build folder; any mounted USB stick. In each place the concatenated render slideshow-x<N>.mp4
@@ -31,4 +32,4 @@ if [ -z "$VLC" ]; then
 fi
 pkill -x VLC 2>/dev/null; sleep 1
 echo "Playing $FILE"; echo "Keep this window open (it holds the Mac awake). Esc then Cmd+Q in VLC to stop."
-exec caffeinate -dis "$VLC" --fullscreen --repeat --no-osd --no-video-title-show --no-audio "$FILE"
+exec caffeinate -dis "$VLC" --fullscreen --repeat --no-osd --no-video-title-show "$FILE"

@@ -37,6 +37,9 @@ def main(argv: list[str]) -> int:
         say("  !", w)
     for line in describe_show(settings):
         say("  " + line)
+    overrides = P.cap_overrides()
+    if overrides:
+        say("  cap overrides ([selection.cap_overrides]): " + ", ".join(f"{y} = {c}" for y, c in sorted(overrides.items())))
     path = P.handoff / SHOW_JSON_NAME
     if a.dry_run:
         say(f"show: dry run; would write {path}")

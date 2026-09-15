@@ -22,7 +22,7 @@
   .tile img, .tile video { display: block; width: 100%; height: 100%; object-fit: cover; }
   .label { position: absolute; left: 0; bottom: 0; max-width: 100%; padding: var(--label-pad, 6px 10px); font-family: -apple-system, Helvetica, sans-serif; font-weight: 600; font-size: var(--label-px, 19px); line-height: 1.25; color: #fff; background: rgba(0,0,0,.62); white-space: pre; pointer-events: none; }
   .rowtag { position: absolute; left: 0; top: 0; padding: var(--rowtag-pad, 4px 10px); font-family: -apple-system, Helvetica, sans-serif; font-weight: 700; font-size: var(--rowtag-px, 22px); line-height: 1.2; color: #ffd; background: rgba(120,40,0,.75); pointer-events: none; }
-  #hud { position: fixed; left: 24px; bottom: 20px; font: 22px/1.3 -apple-system, Helvetica, sans-serif; color: #ddd; background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .4s; pointer-events: none; }
+  #hud { position: fixed; left: 24px; bottom: 20px; font: 22px/1.3 -apple-system, Helvetica, sans-serif; color: #ddd; background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .4s; pointer-events: none; white-space: pre; }
 </style>
 </head>
 <body>
@@ -37,8 +37,9 @@
   // slideshow player. Everything that moves is a pure function of the virtual clock t:
   //   scroll position = speed * t (render) or the running integral of speed (live, where speed can change)
   //   each moving tile runs its own clock from the moment the scheduler granted it a slot.
-  // Modes: live (default): <video> tiles from build/clips, keyboard F / space / [ ].
-  //        ?render=1: moving tiles are <img> frame sequences from build/frames, driven by window.__renderTime(ms).
+  // Modes: live (default): <video> tiles from build/clips, the music from build/audio, keyboard F / space / [ ] / M.
+  //        ?render=1: moving tiles are <img> frame sequences from build/frames, driven by window.__renderTime(ms); no music
+  //        (bin/render muxes the soundtrack itself).
   // ---------------------------------------------------------------------------------------------
   const M = MANIFEST, CFG = M.config, L = M.loop.height, VW = CFG.viewportW, VH = CFG.viewportH;
   const params = new URLSearchParams(location.search);
@@ -438,22 +439,67 @@
   // ---------- live mode ----------
   let showHudUntil = 0;
   function flash(msg) { hud.textContent = msg; hud.style.opacity = 1; showHudUntil = performance.now() + 1800; }
+
+  // ---------- music: one <audio> element plays the manifest's tracks in order ----------
+  // bin/build put the prepared tracks in the manifest (audio.enabled only when prep and show.json agree). The element plays
+  // them in order, moves on at `ended` and starts over when audio.loop is on. Browsers refuse sound before a key press or a
+  // click (the browser launcher's --autoplay-policy=no-user-gesture-required lifts that), so until it starts the HUD says
+  // "music: press any key". A track the browser cannot play is named in the HUD and skipped (Playwright's own Chromium has
+  // no AAC; Google Chrome does). M mutes and unmutes; space pauses the music with the scroll; [ and ] leave it alone.
+  const AUD = M.audio && M.audio.enabled && Array.isArray(M.audio.files) && M.audio.files.length ? M.audio : null;
+  let music = null, musicIdx = 0, musicOn = false, musicDone = false, musicHint = false, musicFailed = 0;
+  const musicName = () => AUD.files[musicIdx].split('/').pop();
+  function nextTrack() {
+    if (musicIdx + 1 >= AUD.files.length && !AUD.loop) { musicDone = true; musicHint = false; flash('music: playlist finished'); return; }
+    musicIdx = (musicIdx + 1) % AUD.files.length;
+    music.src = AUD.files[musicIdx];
+    if (musicOn) music.play().catch(() => {});
+  }
+  if (AUD) {
+    music = document.createElement('audio');
+    music.preload = 'auto';
+    music.volume = Math.min(1, Math.max(0, AUD.volume == null ? 1 : Number(AUD.volume)));   // an element's volume ends at 1; an [audio] volume above that reaches the rendered file only
+    music.src = AUD.files[0];
+    music.addEventListener('ended', nextTrack);
+    music.addEventListener('playing', () => { musicFailed = 0; });
+    music.addEventListener('error', () => {   // a file the browser cannot decode or find: say so, try the next; give up once every track has failed in a row
+      flash(`music: cannot play ${musicName()}`);
+      if (++musicFailed >= AUD.files.length) { musicDone = true; musicHint = false; return; }
+      nextTrack();
+    });
+  }
+  function syncMusic() {                // after any key or click: start the music if it has not started, and follow the pause
+    if (!music || musicDone) return;
+    if (paused) { if (musicOn) music.pause(); return; }
+    if (!musicOn) {
+      musicOn = true;
+      music.play().then(() => { musicHint = false; flash(`music: ${musicName()}`); },
+        err => { if (err && err.name === 'NotAllowedError') { musicOn = false; musicHint = true; } });   // the gesture rule: a key cures it. Any other failure is the error event's to handle
+    } else if (music.paused) music.play().catch(() => {});
+  }
+  window.__musicState = () => (music ? { on: musicOn, hint: musicHint, muted: music.muted, paused: music.paused, track: musicName(), time: music.currentTime, done: musicDone, failed: musicFailed } : null);
+
   addEventListener('keydown', ev => {
     if (ev.key === 'f' || ev.key === 'F') { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => {}); }
     else if (ev.key === ' ') { paused = !paused; flash(paused ? 'paused' : 'playing'); ev.preventDefault(); }
     else if (ev.key === '[') { speed = Math.max(40, speed - 10); flash(speed + ' px/s'); }
     else if (ev.key === ']') { speed = Math.min(240, speed + 10); flash(speed + ' px/s'); }
+    else if (ev.key === 'm' || ev.key === 'M') { if (music) { music.muted = !music.muted; flash(music.muted ? 'music muted' : 'music on'); } }
+    syncMusic();
   });
+  addEventListener('click', syncMusic);
   let lastReal = performance.now();
   if (START_T > 0) { t = START_T; scrollPos = speed * START_T; }
   function step(now) {
-    if (LABELS) { hud.style.opacity = 1; hud.textContent = `t=${fmtT(t)}  ${speed} px/s  loop ${fmtT(L / speed)}`; }
+    if (LABELS) { hud.style.opacity = 1; hud.textContent = `t=${fmtT(t)}  ${speed} px/s  loop ${fmtT(L / speed)}` + (musicHint ? '\nmusic: press any key' : ''); }
+    else if (musicHint && !showHudUntil) { hud.textContent = 'music: press any key'; hud.style.opacity = 1; }
     const dt = Math.min(0.1, (now - lastReal) / 1000); lastReal = now;
     if (!paused) update(t + dt);
     if (showHudUntil && now > showHudUntil) { hud.style.opacity = 0; showHudUntil = 0; }
     requestAnimationFrame(step);
   }
   update(t);
+  syncMusic();                          // with autoplay allowed the music starts now; otherwise the HUD asks for a key
   requestAnimationFrame(step);
 })();
 </script>

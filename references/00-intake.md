@@ -5,18 +5,18 @@ The intake exists because the first run learned most of these facts late, and ea
 ## Ask
 
 ### Source
-1. **Where are the photos, and in what form?** Google Takeout zips, an Apple Photos export, an iCloud download, a folder tree, or a mix. Paths.
-   Why: the whole index stage depends on it. Takeout sidecars carry capture time, place and people tags and can be read without opening the zips; a folder of exports may have lost its metadata entirely and needs the date ladder.
+1. **Where are the photos, and in what form?** Google Takeout zips (kind `takeout`) or the unzipped Takeout folder (kind `folder`), an Apple Photos export, an iCloud download, a folder tree, or a mix. Paths. For Apple Photos: File > Export > Export Unmodified Originals, with "Export IPTC as XMP" ticked, so dates, places and the names of people travel with the files as .xmp sidecars.
+   Why: the whole index stage depends on it. Takeout sidecars carry capture time, place and people tags and can be read without opening the zips; beside the files in a folder they are read too, and so are Apple's .xmp sidecars; a folder of exports without them may have lost its metadata entirely and needs the date ladder.
 2. **Roughly how many files, how many years?**
    Why: sizes the machine time and the cap.
 3. **Other sources worth considering?** Another family member's phone, an old backup, printed-calendar or photo-book exports, shared albums.
-   Why: on the first run a second phone's photos carried the same camera counters as the first, and a set of print exports had lost every timestamp. Knowing this up front turns a forensics phase into a plan.
+   Why: on the first run a second phone's photos carried the same camera counters as the first, and a set of print exports had lost every timestamp. Knowing this up front turns a forensics phase into a plan. Scans and prints that sit in folders named by year (`1998 Florida/`) can be dated from the folder with `[priors] folder_year_rule = true` (precision year, witness named); off by default, like the other `[priors]`.
 
 ### Machines
 4. **Build machine:** OS and version, chip, memory, free disk.
    Why: an older Mac on an old OS cost most of a day of toolchain work on the first run; the brief had not asked.
-5. **Display machine, if different:** OS, screen size and resolution, how it will play (VLC, browser, TV over HDMI). [the build machine; Step 0 detects its display]
-   Why: the output resolution and the launcher depend on it. A 5K panel is driven at its logical resolution, not its physical one. The answer lands in `[output] resolution` and `[output] fps` in `config.toml`; when the display is the build machine, leave the resolution blank and Step 0 writes what it detects.
+5. **Display machine, if different:** OS, screen size and resolution, how it will play: VLC on a computer, a TV playing from a USB stick, or a browser. [the build machine, VLC; Step 0 detects its display]
+   Why: the output resolution, the encoder settings and the launcher depend on it. A 5K panel is driven at its logical resolution, not its physical one. The answer lands in `[output] resolution` and `[output] fps` and in `[machines] player` (`vlc`, `tv-usb` or `browser`) in `config.toml`; `tv-usb` makes the render pick the H.264 level a TV stick decodes and warn about files of 4 GiB and over, which FAT32 sticks refuse; `browser` has kiosk launchers of its own; when the display is the build machine, leave the resolution blank and Step 0 writes what it detects.
 6. **Tools installed?** Python, Node, ffmpeg, Chrome. [Detect; ask only what cannot be detected]
 
 ### The show
@@ -24,26 +24,31 @@ The intake exists because the first run learned most of these facts late, and ea
    Why: the hard stop sets the additions cutoff and the last render. On the first run a bug was found the day of the hard stop and fixed the same afternoon; a day of slack is the difference between a fix and a failure.
 8. **Room and run-of-show.** Where the screen sits, viewing distance, attended or unattended, how long it must run, whether there is internet. [unattended, offline, the length of the reception] Tile size small, medium or large. [medium; large for a wall seen from across the room]
    Why: viewing distance sets the tile size and whether a bigger screen matters; unattended rules out anything that needs a click. The tile size is `[taste] tile_size`: row heights as a share of the screen height, so the same answer holds on any display.
-9. **Audio.** Who owns the room's sound? [no audio; music is planned, so say what you want and it is recorded]
+9. **Audio.** Who owns the room's sound, and should the slideshow have music? [no audio] Music: the files in play order, whether to repeat them until the loop ends, crossfade and fade seconds, and the volume; they go to `[audio]` in `config.toml` and the render lays them under the video; the DJ's sound is the alternative.
+   Why: the soundtrack is muxed onto the final file, so it plays wherever the file plays and the room's owner decides once. The launchers do not mute anything: a silent file makes no sound, and the venue's volume is set by hand.
 
 ### The people
-10. **Who is it about, and who counts as family for the selection?** Names and relationships. A show with no people requirement (a place, a trip's scenery) sets the people gate to `none`.
-    Why: the first run's people gate was "any human in frame", and one photo of an unrelated adult made the cut. The selection needs an identity, not a presence. `[family] gate` is `none`, `people` or `family`; the select stage prints which one ran.
-11. **Seed photos or tags.** 5 to 20 clear photos of each family member, or people tags in the export. [both]
+10. **Who is it about, and who counts as family for the selection?** Names and relationships, spelled as the photo app spells them (a one-word name such as `Sam` also matches a tag such as `Sam Jones`). A show with no people requirement (a place, a trip's scenery) sets the people gate to `none`.
+    Why: the first run's people gate was "any human in frame", and one photo of an unrelated adult made the cut. The selection needs an identity, not a presence. `[family] names` is what the export's people tags are matched against; `[family] gate` is `none`, `people` or `family`; the select stage prints which one ran.
+11. **Seed photos or tags.** 5 to 20 clear photos of each family member, or people tags in the export (a Google Takeout carries them; an Apple export does with "Export IPTC as XMP" ticked). [both]
+    Why: the tags feed the family gate (`[family] gate = "family"`) through `identify --tags-only`, without the detection models; the plain `identify` (the models from Step 0) is the one to run whenever they are installed, since only it fills the person count and person area that the `people` gate, the v4 score and the featured gate use, and select refuses `gate = "people"` on a tags-only `people.csv`. The seed photos are recorded for the face-matching milestone.
 
 ### Scope and theme
 12. **Years or dates.** [the honoree's whole life, or the whole export]
+    Why: dates go to `[show] scope_start` and `scope_end`, which set the first and last year and pro-rate their caps from their months; whole years go to `first_year` and `last_year`; with neither, the honoree's birth year and the event year stand in, and a config with none of them stops the stages with the three keys named.
 13. **Whole-life show or a theme?** A trip, a sport, a tradition, a place, a group. [whole life]
     Why: a theme changes the candidate pool and the lens weights (see `04-selection-lenses.md`).
 14. **Must-include and off-limits.** [none; off-limits is the family's call, and the skill never decides it]
     Either list takes filenames, media ids, or a folder of photos (every file in it). Off-limits files are excluded by select (cut with reason `off-limits`, before any other test) and refused by the apply tool; must-include files are seated like pins, with a warning for any that is not among the candidates.
-15. **How many moments, or let it fall out?** [a cap per year pro-rated for partial years; about 450 to 500 moments for a 15-minute loop]
-    Why: loop length is an output of moment count and scroll speed. Pick the count as content, not as a runtime target.
+15. **How many moments, or let it fall out?** [derived from the loop length target (`[show] loop_minutes_target`, 15 minutes) and the tile size, pro-rated for partial years; or a cap per year in `[selection] cap_per_year`, with `[selection.cap_overrides]` for single years]
+    Why: loop length is an output of moment count, tile size and scroll speed, so the target sizes the cut the other way round: 2.2 seconds per item at medium tiles and 100 px/s (the first run's 469 moments in 15 minutes), scaled by the tile size and the scroll speed, turns the target minutes into an item count, and the cap per year is that count over the year-shares in scope (`04-selection-lenses.md`). The select stage prints the arithmetic. A cap given as a number wins over the derivation; the first run used 33. `[selection.weights]` and `[selection.featured]` hold the v4 weights and the featured thresholds; leave them at the defaults unless the sheets show a reason (`04-selection-lenses.md` has the numbers).
 
 ### Taste (defaults are the first run's)
-16. Mixed tile sizes with occasional larger tiles, no full-screen singles. [yes] (recorded; this version does not act on it)
-17. Live Photos play their whole clip and hold the last frame; videos play silently; nothing pauses the scroll or goes full screen. [yes] (recorded; this version does not act on it: Live Photos always play in full and clips are always silent)
-18. Chronological inside short chapters that each sweep the whole span, so a two-minute glance covers every era. [yes]
+16. Mixed tile sizes with occasional larger tiles, no full-screen singles. [yes] No means no featured picks and videos in the grid, every row a base row (`[taste] mixed_tiles`).
+17. Live Photos as clip or still. [clip] Videos and GIFs included. [yes] Slow motion as the phone shows it, or at real time. [slow] Clips are always silent, and nothing pauses the scroll or goes full screen.
+    Why: `[taste] live_photos = "still"` cuts every clip half and lets the still compete as a plain still; `include_videos = false` and `include_gifs = false` cut those types, all with reason `excluded-type`; `slow_motion = "realtime"` plays every high-frame-rate clip at real time, with per-file exceptions in `<project>/prep-options.json`. A Live Photo as a clip plays whole and holds its last frame.
+18. Order: chronological inside short chapters that each sweep the whole span, so a two-minute glance covers every era; one long timeline; or shuffled. [chapters] Motion density: calm, normal or busy. [normal]
+    Why: `[taste] order` is `chapters`, `chronological` (one chapter) or `shuffled` (a deterministic function of `[taste] seed`, so the same seed gives the same sequence). `motion_density` sets how many tiles may move at once, 2, 4 or 6, and how many in one base row, 1, 2 or 3.
 19. Captions. [none; if the owner wants them, they are baked into tiles during preparation, not rendered live] (recorded; this version does not act on it)
 20. Anything else the owner already knows they want or hate. Verbatim.
 
@@ -59,9 +64,9 @@ Run these in Step 0 (`python curate/setup.py --project <folder> --apply`) and re
 - OS and version, chip, memory, free disk on the build machine.
 - Python, Node, ffmpeg, ffprobe, Chrome, VLC: present, path, version. Compare against the pinned versions in `01-stages.md`.
 - The machine's timezone and the logical resolution of its display. With `--apply` they are written into `config.toml` where it is blank (`[project] timezone` when missing, blank or `UTC`; `[output] resolution`; `[machines] build_os`); without it the lines to paste are printed. What could not be detected is asked.
-- Inside the export: whether Takeout sidecars exist and how many; share of HEIC stills and HEVC videos; presence of Live Photo pairs; longest videos; any 10-bit HDR video; any slow-motion (high frame rate) video; panoramas and extreme aspect ratios; tiny files.
+- Inside the export, from the stages rather than from Step 0: `python curate/run.py ingest --dry-run` counts the sidecars of every source (Takeout JSON inside the zips or beside the files, Apple .xmp, how many resolved to a file) without copying anything; the share of HEIC stills and HEVC videos, Live Photo pairs, the longest videos, 10-bit HDR, slow motion (100 fps and over), panoramas and extreme aspect ratios and tiny files are known once `index` has probed the files, and `handoff` lists them in `HANDOFF.md`. Report the sidecar counts before ingest and the rest after index.
 - Whether the working folder is on a synced drive (Google Drive, iCloud Drive, OneDrive, Dropbox). Warn if so: synced folders fought both git and file deletion on the first run. Prefer a plain local folder.
 
 ## Write down
 
-Save the answers as `project/intake.md` (prose, the owner's words kept verbatim where taste is concerned) and `project/config.toml` (paths, machines, dates, cap, theme, family names, defaults chosen; the display and taste answers go to `[output]` and `[taste]`, which `python curate/run.py show` turns into the numbers the build reads). Then fill the decided brief from `07-decided-brief-template.md`. The intake answers are the brief's first changelog entries.
+Save the answers as `project/intake.md` (prose, the owner's words kept verbatim where taste is concerned) and `project/config.toml` (paths, machines, dates, cap, theme, family names, defaults chosen; the scope dates go to `[show]`, the music to `[audio]`, the display and taste answers to `[output]` and `[taste]`, which `python curate/run.py show` turns into the numbers the build reads). Then fill the decided brief from `07-decided-brief-template.md`. The intake answers are the brief's first changelog entries.

@@ -65,6 +65,7 @@ const MEDIA = path.join(HANDOFF, 'media');
 const TILES = path.join(BUILD, 'tiles');
 const CLIPS = path.join(BUILD, 'clips');
 const FRAMES = path.join(BUILD, 'frames');
+const AUDIO = path.join(BUILD, 'audio');     // the soundtrack: the prepared tracks, the playlist and each render's soundtrack
 const MEDIA_CSV = path.join(HANDOFF, 'media.csv');
 const FEATURES_TXT = path.join(HANDOFF, 'features.txt');
 const CUT_LIST_CSV = path.join(HANDOFF, 'cut-list.csv');
@@ -84,6 +85,53 @@ function readShow() {
   return show;
 }
 const SHOW = readShow();
+
+// ---------- the soundtrack: show.json audio (references/02) ----------
+// The owner's music: files in play order (absolute paths, resolved and checked in Python), whether the playlist repeats,
+// the crossfade between neighbouring tracks, the fade at the start and the end of the show, and the volume. A show.json
+// from 0.2 lacks fade_s and volume, so those take their defaults; a missing or disabled section means no music, which is
+// what 0.2 did. A value out of range stops the command with the key name rather than playing something else.
+function audioSettings() {
+  const off = { enabled: false, files: [], loop: true, crossfade: 2, fade: 2, volume: 1 };
+  const a = SHOW && SHOW.audio;
+  if (!a || typeof a !== 'object') return off;
+  const bad = (key, what) => new Error(`${rel(SHOW_JSON)}: audio.${key} is ${JSON.stringify(a[key])}, ${what}; fix [audio] in config.toml and run python curate/run.py show`);
+  const num = (key, dflt, lo, hi) => {
+    const v = a[key] == null ? dflt : a[key];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < lo || v > hi) throw bad(key, hi === Infinity ? `not a number of at least ${lo}` : `not a number from ${lo} to ${hi}`);
+    return v;
+  };
+  if (typeof a.enabled !== 'boolean') throw bad('enabled', 'not true or false');
+  if (!Array.isArray(a.files) || a.files.some(f => typeof f !== 'string' || !f)) throw bad('files', 'not a list of paths');
+  const s = { enabled: a.enabled, files: a.files.slice(), loop: a.loop == null ? true : a.loop, crossfade: num('crossfade_s', 2, 0, Infinity), fade: num('fade_s', 2, 0, Infinity), volume: num('volume', 1, 0, 2) };
+  if (typeof s.loop !== 'boolean') throw bad('loop', 'not true or false');
+  if (s.enabled && !s.files.length) throw bad('files', 'empty with audio.enabled true');
+  return s;
+}
+// Where bin/prep puts track k (1-based, the play order) of the soundtrack: build/audio/NN-<stem>.m4a. The stem keeps
+// letters, digits, dot, dash and underscore and turns every other run of characters into one underscore, because the
+// player loads the file by a relative URL and a # or ? in a music title would cut it short; NN- keeps the names unique.
+function audioPath(k, source) { return path.join(AUDIO, String(k).padStart(2, '0') + '-' + stemOf(path.basename(source)).replace(/[^A-Za-z0-9._-]+/g, '_') + '.m4a'); }
+// The prepared tracks, taken from prep-manifest.json only when they match show.json file for file and in order: the build
+// then puts them in the player's manifest and the render muxes them. A stale or missing preparation is named (why) and
+// counts as no music, never guessed around; the caller decides whether that is a warning (build) or a stop (render).
+function preparedAudio(prep) {
+  const a = audioSettings();
+  if (!a.enabled) return { enabled: false, tracks: [], why: '' };
+  const list = prep && Array.isArray(prep.audio) ? prep.audio : [];
+  const tracks = [];
+  for (let k = 1; k <= a.files.length; k++) {
+    const src = a.files[k - 1], name = path.basename(src);
+    const e = list.find(x => x && x.index === k);
+    if (!e) return { enabled: false, tracks, why: `track ${k} (${name}) is not in prep-manifest.json; run bin/prep` };
+    if (path.resolve(String(e.source)) !== path.resolve(src)) return { enabled: false, tracks, why: `track ${k} was prepared from ${e.source}, show.json names ${src}; run bin/prep --force --audio-only` };
+    if (!e.ok || !(e.duration > 0)) return { enabled: false, tracks, why: `track ${k} (${name}) failed its prep check; run bin/prep --force --audio-only` };
+    const abs = path.join(BUILD, String(e.path));
+    if (!fs.existsSync(abs)) return { enabled: false, tracks, why: `${e.path} is missing; run bin/prep` };
+    tracks.push({ index: k, source: src, path: String(e.path), abs, duration: e.duration });
+  }
+  return { enabled: true, tracks, why: '' };
+}
 
 // ffmpeg/ffprobe: [tools] in config.toml, else the repo's tools/ffmpeg/, else PATH.
 function toolBin(name) {
@@ -260,6 +308,14 @@ async function probeVideo(file) {
     duration, avgFps, nbFrames, pixFmt: v.pix_fmt, transfer: v.color_transfer || '', primaries: v.color_primaries || '',
     range: v.color_range || '', hdr, hasAudio: !!a, creation,
   };
+}
+// Facts about an audio file: codec, channels, sample rate and the audio stream's own duration (a container can be longer).
+async function probeAudio(file) {
+  const j = await ffprobeJson(file);
+  const a = (j.streams || []).find(s => s.codec_type === 'audio');
+  if (!a) throw new Error('no audio stream in ' + path.basename(file));
+  const duration = Number(a.duration || (j.format && j.format.duration) || 0);
+  return { codec: a.codec_name, channels: Number(a.channels) || 0, sampleRate: Number(a.sample_rate) || 0, duration };
 }
 // Stored (un-rotated) pixel dimensions as sips sees them. sips ignores orientation tags. macOS only.
 async function sipsDims(file) {
@@ -441,8 +497,8 @@ function readPrepManifest() {
 
 module.exports = {
   FRAMES_PAD_MAX,
-  ROOT, PROJECT, HANDOFF, MEDIA, BUILD, TOOLS, TILES, CLIPS, FRAMES, MEDIA_CSV, FEATURES_TXT, CUT_LIST_CSV, PREP_MANIFEST,
-  SHOW_JSON, SHOW, readShow,
+  ROOT, PROJECT, HANDOFF, MEDIA, BUILD, TOOLS, TILES, CLIPS, FRAMES, AUDIO, MEDIA_CSV, FEATURES_TXT, CUT_LIST_CSV, PREP_MANIFEST,
+  SHOW_JSON, SHOW, readShow, audioSettings, audioPath, preparedAudio, probeAudio,
   FFMPEG, FFPROBE, SIPS, HEIC_PY, CHROME, IS_WIN, IS_MAC, STILL_EXT, VIDEO_EXT, GIF_EXT, MAX_TILE_H, MAX_CLIP_H, SLOWMO_MIN_FPS, IGNORED_FILES,
   CLIP_TYPES, MOVING_TYPES,
   stemOf, extClass, isHeicLike, sipsCan, tilePath, clipPath, rel, webRel, pythonBin,
@@ -455,7 +511,7 @@ module.exports = {
 // `node lib/common.js --print build` prints one resolved path (the shell wrappers use it); --paths prints them all as JSON.
 if (require.main === module) {
   const a = process.argv.slice(2);
-  const all = { root: ROOT, project: PROJECT, handoff: HANDOFF, media: MEDIA, build: BUILD, tiles: TILES, clips: CLIPS, frames: FRAMES, show: SHOW_JSON, ffmpeg: FFMPEG, ffprobe: FFPROBE, chrome: CHROME, python: pythonBin(), sips: SIPS };
+  const all = { root: ROOT, project: PROJECT, handoff: HANDOFF, media: MEDIA, build: BUILD, tiles: TILES, clips: CLIPS, frames: FRAMES, audio: AUDIO, show: SHOW_JSON, ffmpeg: FFMPEG, ffprobe: FFPROBE, chrome: CHROME, python: pythonBin(), sips: SIPS };
   const i = a.indexOf('--print');
   if (i >= 0) { const v = all[a[i + 1]]; if (v == null) { console.error('unknown path ' + a[i + 1] + '; one of ' + Object.keys(all).join(', ')); process.exit(2); } console.log(v); }
   else console.log(JSON.stringify(all, null, 1));

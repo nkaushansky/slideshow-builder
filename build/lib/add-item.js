@@ -85,10 +85,14 @@ for (const inp of inputs) {
   }
   inp.newName = `${date}_${inp.base}`; inp.stem = C.stemOf(inp.newName);
 }
+// [taste] live_photos = "still" (show.json): Live Photos are in the set as stills alone, so no pair is added or formed here
+const lpStill = !!(C.SHOW && C.SHOW.taste && C.SHOW.taste.live_photos === 'still');
+const LP_STILL_HINT = 'show.json says [taste] live_photos = "still", so a Live Photo joins the set as its still alone: add the still by itself, or set live_photos = "clip" in config.toml, run python curate/run.py show and select again';
 if (inputs.length === 2) {
   const classes = inputs.map(i => i.cls).sort().join('+');
   if (classes !== 'still+video') die('a Live Photo is one still plus one video');
   if (inputs[0].stem !== inputs[1].stem) die(`Live Photo halves must share a stem: ${inputs[0].base} vs ${inputs[1].base}`);
+  if (lpStill) die(LP_STILL_HINT);
 }
 
 function isoToCsv(s) {
@@ -144,6 +148,7 @@ async function inspectVideo(inp) {
         const complementary = (inp.cls === 'still' && otherCls === 'video') || (inp.cls === 'video' && otherCls === 'still');
         if (!complementary) die(`${inp.newName} collides with ${other.filename} (same stem)`);
         if (other.companion) die(`${other.filename} already has a Live Photo companion (${other.companion})`);
+        if (lpStill) die(`${inp.newName} would pair with ${other.filename} as a Live Photo; ${LP_STILL_HINT}`);
         pairWith.set(inp.newName, other);
       }
     }

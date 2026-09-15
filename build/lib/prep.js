@@ -3,25 +3,27 @@
 // bin/prep — derive display assets from handoff/media into the project's build/. Never touches media/.
 //   build/tiles/<stem>.jpg      plain stills (Live Photo stills are never shown), JPEG q90, display height <= show.json taste.max_tile_height (1640 without show.json)
 //   build/clips/<stem>.mp4      Live Photo .MP4 halves, standalone videos, GIFs -> H.264 muted, display height <= show.json taste.max_tile_height (1640 without show.json)
-//   build/prep-manifest.json    per-file facts that build/render rely on (clip durations, slow-motion, HDR, dims)
+//   build/audio/NN-<stem>.m4a   the soundtrack's tracks in play order (show.json audio.files) as AAC 192 kbit/s, 48 kHz, stereo; only when music is on
+//   build/prep-manifest.json    per-file facts that build/render rely on (clip durations, slow-motion, HDR, dims, the audio tracks)
 //   build/prep-report.txt       verification report; build/prep.log has the per-file lines
 // Idempotent: existing outputs are skipped unless --force. Outputs are written to a temp name and renamed.
-// Usage: bin/prep [--only <filename>]... [--force] [--tiles-only|--clips-only] [--verify-only] [--jobs N] [--quiet]
+// Usage: bin/prep [--only <filename>]... [--force] [--tiles-only|--clips-only|--audio-only] [--verify-only] [--jobs N] [--quiet]
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const C = require('./common');
 
-const USAGE = 'usage: bin/prep [--only <filename>]... [--force] [--tiles-only|--clips-only] [--verify-only] [--jobs N] [--quiet]';
-const opt = { only: [], force: false, tiles: true, clips: true, verifyOnly: false, jobs: 0, quiet: false };
+const USAGE = 'usage: bin/prep [--only <filename>]... [--force] [--tiles-only|--clips-only|--audio-only] [--verify-only] [--jobs N] [--quiet]';
+const opt = { only: [], force: false, tiles: true, clips: true, audio: true, verifyOnly: false, jobs: 0, quiet: false };
 {
   const a = process.argv.slice(2);
   for (let i = 0; i < a.length; i++) {
     if (a[i] === '--only') opt.only.push(a[++i]);
     else if (a[i] === '--force') opt.force = true;
-    else if (a[i] === '--tiles-only') opt.clips = false;
-    else if (a[i] === '--clips-only') opt.tiles = false;
+    else if (a[i] === '--tiles-only') { opt.clips = false; opt.audio = false; }
+    else if (a[i] === '--clips-only') { opt.tiles = false; opt.audio = false; }
+    else if (a[i] === '--audio-only') { opt.tiles = false; opt.clips = false; }
     else if (a[i] === '--verify-only') opt.verifyOnly = true;
     else if (a[i] === '--jobs') opt.jobs = Number(a[++i]);
     else if (a[i] === '--quiet') opt.quiet = true;
@@ -30,7 +32,13 @@ const opt = { only: [], force: false, tiles: true, clips: true, verifyOnly: fals
   }
 }
 const JOBS = opt.jobs || os.cpus().length || 4;
-const OPTIONS_FILE = path.join(__dirname, '..', 'prep-options.json');
+// per-file switches: <project>/prep-options.json when it exists, else the repository's build/prep-options.json
+const OPTIONS_FILES = [C.PROJECT && path.join(C.PROJECT, 'prep-options.json'), path.join(__dirname, '..', 'prep-options.json')].filter(Boolean);
+// show.json taste.slow_motion: "slow" plays >= 100 fps captures at 30 fps as the phone shows them (0.2's only behaviour),
+// "realtime" plays them at their real speed; the lists in prep-options.json are the per-file exceptions to either
+const SLOW_MODES = ['slow', 'realtime'];
+const slowMode = C.SHOW && C.SHOW.taste.slow_motion != null ? C.SHOW.taste.slow_motion : 'slow';
+if (!SLOW_MODES.includes(slowMode)) { console.error(`${C.rel(C.SHOW_JSON)}: taste.slow_motion ${JSON.stringify(slowMode)} is not slow or realtime; fix [taste] slow_motion in config.toml and run python curate/run.py show`); process.exit(2); }
 
 const exists = p => { try { return fs.statSync(p).size > 0; } catch (_) { return false; } };
 const rm = p => { try { fs.unlinkSync(p); } catch (_) { /* ignore */ } };
@@ -44,8 +52,18 @@ function warn(line) { report.push('WARN  ' + line); say('  ! ' + line); }
 let fatal = 0;
 function error(line) { fatal++; report.push('ERROR ' + line); say('  X ' + line); }
 
+// `realtime` lists clips that play at real speed although captured at >= 100 fps (the exceptions when the mode is slow);
+// `slow` lists the ones that stay slow when the mode is realtime. A file that is there but unreadable stops the run: an
+// exception list ignored in silence would undo the owner's choices without a word.
 function loadOptions() {
-  try { return JSON.parse(fs.readFileSync(OPTIONS_FILE, 'utf8')); } catch (_) { return {}; }
+  for (const file of OPTIONS_FILES) {
+    if (!fs.existsSync(file)) continue;
+    let o;
+    try { o = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`${file} is not valid JSON (${e.message})`); }
+    const list = key => { const v = o[key]; if (v == null) return []; if (!Array.isArray(v) || v.some(x => typeof x !== 'string')) throw new Error(`${file}: "${key}" must be a list of filenames`); return v; };
+    return { file, realtime: list('realtime'), slow: list('slow') };
+  }
+  return { file: '', realtime: [], slow: [] };
 }
 
 // ---------- set verification (the HANDOFF.md checks plus a few of our own) ----------
@@ -178,13 +196,43 @@ async function verifyClip(r, probe, realtime) {
   return { ok: problems.length === 0, error: problems.join('; '), width: o.width, height: o.height, duration: o.duration, fps: o.avgFps, nbFrames: o.nbFrames, plan };
 }
 
+// ---------- audio: the soundtrack's tracks, AAC in play order (show.json audio; references/02) ----------
+async function makeAudio(k, src) {
+  const out = C.audioPath(k, src);
+  const tmp = out + '.tmp';
+  if (!opt.force && exists(out)) return { status: 'skipped' };
+  if (!exists(src)) return { status: 'failed', error: 'source missing' };
+  const t = Date.now();
+  rm(tmp);
+  // the first audio stream only, no cover art or subtitles; a file ffmpeg cannot decode, or one with no audio, fails here and is reported
+  const res = await C.run(C.FFMPEG, ['-hide_banner', '-nostdin', '-v', 'error', '-y', '-i', src, '-map', '0:a:0', '-vn', '-sn', '-dn',
+    '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-f', 'mp4', tmp]);
+  if (res.code !== 0 || !exists(tmp)) { rm(tmp); return { status: 'failed', error: res.err.trim().split('\n').slice(-2).join(' | ') || 'ffmpeg wrote nothing' }; }
+  fs.renameSync(tmp, out);
+  return { status: 'done', ms: Date.now() - t };
+}
+async function verifyAudio(k, src) {
+  const out = C.audioPath(k, src);
+  if (!exists(out)) return { ok: false, error: 'missing' };
+  let a;
+  try { a = await C.probeAudio(out); } catch (e) { return { ok: false, error: e.message }; }
+  const problems = [];
+  if (a.codec !== 'aac') problems.push('codec ' + a.codec);
+  if (!(a.duration > 0)) problems.push('no duration');
+  if (a.channels !== 2) problems.push(`${a.channels} channel(s)`);
+  if (a.sampleRate !== 48000) problems.push(`${a.sampleRate} Hz`);
+  return { ok: problems.length === 0, error: problems.join('; '), ...a };
+}
+
 async function main() {
   const t0 = Date.now();
   C.ensureDirs();
   logStream = fs.createWriteStream(path.join(C.BUILD, 'prep.log'), { flags: 'a' });
   log(`\n==== prep ${new Date().toISOString()} ${process.argv.slice(2).join(' ')}`);
   const options = loadOptions();
-  const realtime = new Set(options.realtime || []);
+  const realtimeList = new Set(options.realtime), slowList = new Set(options.slow);
+  const isRealtime = f => (slowMode === 'realtime' ? !slowList.has(f) : realtimeList.has(f));
+  const audio = C.audioSettings();    // a bad [audio] value stops here, before anything is made
   const { rows } = C.readMediaCsv();
   const byName = new Map(rows.map(r => [r.filename, r]));
 
@@ -230,11 +278,16 @@ async function main() {
     if (Math.abs(p.duration - +r.duration_s) > 0.3) warn(`${r.filename}: ffprobe duration ${p.duration.toFixed(2)} vs media.csv ${r.duration_s}`);
   }
   const hdr = clips.filter(r => probes.get(r.filename) && probes.get(r.filename).hdr);
-  const slow = clips.filter(r => probes.get(r.filename) && probes.get(r.filename).avgFps >= C.SLOWMO_MIN_FPS && !realtime.has(r.filename));
+  const highFps = clips.filter(r => probes.get(r.filename) && probes.get(r.filename).avgFps >= C.SLOWMO_MIN_FPS);
+  const slow = highFps.filter(r => !isRealtime(r.filename)), fast = highFps.filter(r => isRealtime(r.filename));
   note(`HDR (tone-mapped to SDR): ${hdr.length} -> ${hdr.map(r => r.filename).join(', ')}`);
+  const optionsWhere = options.file ? (C.PROJECT && options.file.startsWith(C.PROJECT) ? C.rel(options.file) : options.file) : 'none found';
+  note(`slow motion mode: ${slowMode} (${C.SHOW ? 'show.json taste.slow_motion' : 'no show.json, the default'}); prep-options.json: ${optionsWhere}; exceptions: realtime [${options.realtime.join(', ')}], slow [${options.slow.join(', ')}]`);
   note(`slow-motion (>= ${C.SLOWMO_MIN_FPS} fps source, played at 30 fps): ${slow.length} -> ` +
     slow.map(r => `${r.filename} (${r.duration_s}s real -> ${(probes.get(r.filename).nbFrames / 30).toFixed(1)}s)`).join(', '));
-  if (realtime.size) note(`forced real-time by prep-options.json: ${[...realtime].join(', ')}`);
+  note(`>= ${C.SLOWMO_MIN_FPS} fps source played at real speed: ${fast.length} -> ${fast.map(r => r.filename).join(', ')}`);
+  const unknown = [...options.realtime, ...options.slow].filter(f => !byName.has(f));
+  if (unknown.length) warn(`prep-options.json names ${unknown.length} file(s) not in media.csv: ${unknown.join(', ')}`);
 
   if (opt.clips && !opt.verifyOnly) {
     const todo = pick(clips).filter(r => probes.has(r.filename));
@@ -245,7 +298,7 @@ async function main() {
     say(`Clips: ${todo.length} to encode, ${lanes} at a time -> ${C.rel(C.CLIPS)}`);
     let n = 0;
     const results = await C.pool(todo, lanes, async r => {
-      const res = await makeClip(r, probes.get(r.filename), realtime.has(r.filename));
+      const res = await makeClip(r, probes.get(r.filename), isRealtime(r.filename));
       n++;
       if (res.status === 'done') log(`  [clip ${n}/${todo.length}] ${r.filename} ${C.fmtSecs(res.ms)} ${res.plan.ow}x${res.plan.oh}${res.plan.slow !== 1 ? ` slow x${res.plan.slow.toFixed(1)}` : ''}${probes.get(r.filename).hdr ? ' HDR->SDR' : ''}`);
       else if (res.status === 'failed') { log(`  [clip ${n}/${todo.length}] ${r.filename} FAILED: ${res.error}`); failures.push(`clip ${r.filename}: ${res.error}`); }
@@ -256,9 +309,27 @@ async function main() {
     note(`clips: ${c.done} made, ${c.skipped} skipped, ${c.failed} failed`);
   }
 
+  // ---- audio: one AAC file per track of the soundtrack, in play order; nothing when show.json has music off.
+  // --only targets media files, so a run with it leaves the tracks alone (they are skipped when present anyway).
+  if (audio.enabled && opt.audio && !opt.verifyOnly && !opt.only.length) {
+    fs.mkdirSync(C.AUDIO, { recursive: true });
+    say(`Audio: ${audio.files.length} track(s) -> ${C.rel(C.AUDIO)}`);
+    const results = [];
+    for (let k = 1; k <= audio.files.length; k++) {         // one at a time: a handful of files, logged in play order
+      const src = audio.files[k - 1];
+      const res = await makeAudio(k, src);
+      results.push(res);
+      if (res.status === 'done') log(`  [audio ${k}/${audio.files.length}] ${src} -> ${path.basename(C.audioPath(k, src))} ${C.fmtSecs(res.ms)}`);
+      else if (res.status === 'failed') { log(`  [audio ${k}/${audio.files.length}] ${src} FAILED: ${res.error}`); failures.push(`audio ${src}: ${res.error}`); }
+    }
+    const c = tally(results);
+    say(`  audio: ${c.done} made, ${c.skipped} already there, ${c.failed} failed`);
+    note(`audio: ${c.done} made, ${c.skipped} skipped, ${c.failed} failed`);
+  }
+
   // ---- verify everything that exists, write the manifest
   say('Verifying outputs...');
-  const manifest = { generatedAt: new Date().toISOString(), maxTileHeight: C.MAX_TILE_H, maxClipHeight: C.MAX_CLIP_H, tiles: {}, clips: {} };
+  const manifest = { generatedAt: new Date().toISOString(), maxTileHeight: C.MAX_TILE_H, maxClipHeight: C.MAX_CLIP_H, slowMotion: slowMode, tiles: {}, clips: {}, audio: [] };
   let tileOk = 0, tileBad = 0, tileMissing = 0;
   for (const r of stills) {
     const v = verifyTile(r);
@@ -270,7 +341,7 @@ async function main() {
   let clipOk = 0, clipBad = 0, clipMissing = 0;
   await C.pool(clips.filter(r => probes.has(r.filename)), 4, async r => {
     const p = probes.get(r.filename);
-    const v = await verifyClip(r, p, realtime.has(r.filename));
+    const v = await verifyClip(r, p, isRealtime(r.filename));
     if (v.error === 'missing') { clipMissing++; return; }
     if (!v.ok) { clipBad++; warn(`clip ${r.filename}: ${v.error}`); } else clipOk++;
     manifest.clips[r.filename] = {
@@ -281,6 +352,20 @@ async function main() {
   });
   note(`verified tiles ok ${tileOk}, bad ${tileBad}, missing ${tileMissing}; clips ok ${clipOk}, bad ${clipBad}, missing ${clipMissing}`);
   say(`  tiles ok ${tileOk} / bad ${tileBad} / missing ${tileMissing}; clips ok ${clipOk} / bad ${clipBad} / missing ${clipMissing}`);
+  // the tracks: every one show.json names, in order; an output that is there is probed and recorded, ok or not, so the
+  // build and the render can tell a ready soundtrack from a stale one
+  if (audio.enabled) {
+    let aOk = 0, aBad = 0, aMissing = 0;
+    for (let k = 1; k <= audio.files.length; k++) {
+      const src = audio.files[k - 1];
+      const v = await verifyAudio(k, src);
+      if (v.error === 'missing') { aMissing++; continue; }
+      if (!v.ok) { aBad++; warn(`audio ${path.basename(C.audioPath(k, src))}: ${v.error}`); } else aOk++;
+      manifest.audio.push({ index: k, source: src, path: C.webRel(C.BUILD, C.audioPath(k, src)), duration: v.duration || 0, codec: v.codec || '', sampleRate: v.sampleRate || 0, channels: v.channels || 0, ok: v.ok });
+    }
+    note(`verified audio ok ${aOk}, bad ${aBad}, missing ${aMissing} of ${audio.files.length} track(s): ${manifest.audio.map(a => `${path.posix.basename(a.path)} ${a.duration.toFixed(1)}s${a.ok ? '' : ' (bad)'}`).join(', ')}`);
+    say(`  audio ok ${aOk} / bad ${aBad} / missing ${aMissing}`);
+  } else note(C.SHOW ? 'audio: off (show.json audio.enabled false)' : 'audio: off (no show.json)');
   if ((tileBad || clipBad) && !opt.force) say('  ! existing outputs are kept as they are without --force; run bin/prep --force to remake the bad ones');
   fs.writeFileSync(C.PREP_MANIFEST, JSON.stringify(manifest, null, 1));
   for (const f of failures) note('FAILED ' + f);

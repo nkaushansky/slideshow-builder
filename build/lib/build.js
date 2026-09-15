@@ -3,10 +3,12 @@
 // bin/build — media.csv + build/prep-manifest.json -> items -> date keys -> chapters -> spacing -> justified rows
 //   -> <project>/build/manifest.json, sequence.txt, player.html (player.template.html with the manifest inlined).
 // Asset paths inside the manifest are relative to the project's build/ folder, where player.html lives.
-// Deterministic: no randomness is used (CONFIG.seed is reserved). Prints row counts, feature share and the acceptance checks.
-// The display and taste settings (resolution, fps, row heights, gutter, scroll speed, background, chapters) come from
-// <project>/handoff/show.json, which `python curate/run.py show` derives from config.toml; the values in CONFIG below are the
-// first run's and are what a build without show.json falls back to, with a warning.
+// Deterministic: the only randomness is the shuffled order, a function of CONFIG.seed and the set alone. Prints row counts,
+// feature share and the acceptance checks.
+// The display and taste settings (resolution, fps, row heights, gutter, scroll speed, background, chapters, order, motion
+// density, mixed tiles, seed) come from <project>/handoff/show.json, which `python curate/run.py show` derives from
+// config.toml; the values in CONFIG below are the first run's and are what a build without show.json falls back to, with a
+// warning. The soundtrack for the live player comes from show.json audio and the tracks bin/prep recorded.
 // Usage: bin/build [--speed N] [--quiet]
 
 const fs = require('fs');
@@ -22,8 +24,9 @@ const CONFIG = {
   pullMaxGap: 1.25,        // years: an item is pulled forward into a row only if it is at most this far ahead of the item it jumps past (owner, first run: featured stills pulled 1.5 yr forward read as out of place; 1.0 costs another 45 s of loop and 63% feature rows)
   gutter: 8,
   chapters: 10,
-  seed: 20260905,          // reserved; nothing random is used today
-  movingCap: 4,            // runtime: max tiles animating at once (3 in the spec; 4 since the first run so Live Photos get turns even with three videos on screen)
+  order: 'chapters',       // show.json taste.order: chapters (ten mini-timelines) | chronological (one chapter) | shuffled (seeded shuffle, then dealt into chapters)
+  seed: 20260905,          // show.json taste.seed; the shuffled order is a function of it and the set alone
+  movingCap: 4,            // runtime: max tiles animating at once (3 in the spec; 4 since the first run so Live Photos get turns even with three videos on screen); show.json taste.moving_cap: calm 2, normal 4, busy 6
   rotateSlots: true,       // runtime: a Live Photo/GIF hands its slot on after `rotatePlays` full plays when another tile is waiting (owner, first run)
   rotatePlays: 1,
   maxWait: 4,              // runtime: seconds a tile may wait for its first turn before the longest-running Live Photo is frozen to make room
@@ -33,7 +36,8 @@ const CONFIG = {
   livePhotoHold: 1.5,      // s, hold on the last frame before a Live Photo / GIF restarts
   videoMinRowGap: 2,       // row-index distance between two video rows (2 = never adjacent)
   videoNudge: 12,          // positions a standalone video may move within its chapter to keep video rows apart (videos cluster in 2022-23)
-  maxBaseMoving: 2,        // no base row with more than this many moving tiles
+  maxBaseMoving: 2,        // no base row with more than this many moving tiles; show.json taste.max_base_moving: calm 1, normal 2, busy 3
+  mixedTiles: true,        // show.json taste.mixed_tiles; false keeps standalone videos out of the feature rows (the anchors are the featured stills alone)
   wideAloneRatio: 2.4,     // an item wider than this takes a row alone
   minFill: 0.9,            // a base row may stop short of an anchor only when this full (natural width / row width)
   fillBias: 0.1,           // when an item straddles the row edge, prefer including it (shorter row) unless it is this much worse in log-height
@@ -44,6 +48,7 @@ const CONFIG = {
   renderFps: 60,
 };
 // handoff/show.json replaces the first-run defaults above before the command line is read, so the flags still win.
+const ORDERS = ['chapters', 'chronological', 'shuffled'];
 const SHOW = C.SHOW;
 if (SHOW) {
   const num = (section, key) => {
@@ -58,7 +63,26 @@ if (SHOW) {
   if (!/^#[0-9A-Fa-f]{6}$/.test(String(SHOW.taste.background))) throw new Error(`${C.rel(C.SHOW_JSON)}: taste.background ${JSON.stringify(SHOW.taste.background)} is not #RRGGBB; run python curate/run.py show`);
   CONFIG.background = SHOW.taste.background;
   if (Number.isInteger(SHOW.taste.chapters) && SHOW.taste.chapters > 0) CONFIG.chapters = SHOW.taste.chapters;
+  // the taste knobs that act since 0.3; a show.json from 0.2 lacks them and keeps the defaults above
+  const whole = (key, dflt, min) => {
+    const v = SHOW.taste[key];
+    if (v == null) return dflt;
+    if (!(Number.isInteger(v) && v >= min)) throw new Error(`${C.rel(C.SHOW_JSON)}: taste.${key} is ${JSON.stringify(v)}, not a whole number of at least ${min}; run python curate/run.py show`);
+    return v;
+  };
+  CONFIG.movingCap = whole('moving_cap', CONFIG.movingCap, 1);
+  CONFIG.maxBaseMoving = whole('max_base_moving', CONFIG.maxBaseMoving, 1);
+  CONFIG.seed = whole('seed', CONFIG.seed, 0);
+  if (SHOW.taste.order != null) {
+    if (!ORDERS.includes(SHOW.taste.order)) throw new Error(`${C.rel(C.SHOW_JSON)}: taste.order ${JSON.stringify(SHOW.taste.order)} is not one of ${ORDERS.join(' | ')}; run python curate/run.py show`);
+    CONFIG.order = SHOW.taste.order;
+  }
+  if (SHOW.taste.mixed_tiles != null) {
+    if (typeof SHOW.taste.mixed_tiles !== 'boolean') throw new Error(`${C.rel(C.SHOW_JSON)}: taste.mixed_tiles ${JSON.stringify(SHOW.taste.mixed_tiles)} is not true or false; run python curate/run.py show`);
+    CONFIG.mixedTiles = SHOW.taste.mixed_tiles;
+  }
 }
+if (CONFIG.order === 'chronological') CONFIG.chapters = 1;   // one timeline from the first year to the last
 // per-item playback overrides: <project>/overrides.json when it exists, else the repo's build/overrides.json (see overrides.example.json)
 const OVERRIDES_FILE = [C.PROJECT && path.join(C.PROJECT, 'overrides.json'), path.join(__dirname, '..', 'overrides.json')].filter(Boolean).find(p => fs.existsSync(p)) || path.join(__dirname, '..', 'overrides.json');
 const TEMPLATE = path.join(__dirname, '..', 'player.template.html');
@@ -93,6 +117,15 @@ function loadItems() {
   const manifest = C.readPrepManifest() || { tiles: {}, clips: {} };
   // prep capped the tiles at the max height show.json carried when it ran; a display change since then needs new tiles
   if (SHOW && manifest.maxTileHeight != null && manifest.maxTileHeight !== SHOW.taste.max_tile_height) warnings.unshift(`tiles were prepared for max height ${manifest.maxTileHeight}, show.json says ${SHOW.taste.max_tile_height}; run bin/prep --force`);
+  // prep verified the clips under the slow_motion mode show.json carried when it ran (slow when the key was absent); a mode
+  // change since then means the slow-motion clips on disk play at the wrong speed, so the build stops when there is one
+  if (SHOW && manifest.slowMotion != null) {
+    const want = SHOW.taste.slow_motion != null ? SHOW.taste.slow_motion : 'slow';
+    if (manifest.slowMotion !== want) {
+      const anySlow = Object.values(manifest.clips || {}).some(c => c && c.sourceFps >= C.SLOWMO_MIN_FPS);
+      (anySlow ? problems : warnings).push(`clips were prepared with slow_motion = ${manifest.slowMotion}, show.json says ${want}; run bin/prep --force${anySlow ? '' : ' (no slow-motion capture in the set, so only the manifest is stale)'}`);
+    }
+  }
   let overrides = {};
   try { overrides = JSON.parse(fs.readFileSync(OVERRIDES_FILE, 'utf8')).items || {}; } catch (_) { /* none */ }
   const items = [];
@@ -101,6 +134,9 @@ function loadItems() {
     const kind = r.type === 'still' ? 'still' : r.type === 'livephoto-video' ? 'live' : r.type === 'video' ? 'video' : 'gif';
     const m = kind === 'still' ? manifest.tiles[r.filename] : manifest.clips[r.filename];
     if (!m) warnings.push(`${r.filename}: no prep output yet, using media.csv dimensions/duration`);
+    // prep keeps an output that fails its check (a clip made under the other slow_motion mode, a tile of the wrong size)
+    // and marks it; building on it would put the wrong thing in the player, so it stops here
+    if (m && m.ok === false) problems.push(`${r.filename}: its prep output failed verification (build/prep-report.txt); run bin/prep --force`);
     const w = m ? m.width : +r.width, h = m ? m.height : +r.height;
     const companion = r.companion ? byName.get(r.companion) : null;
     const featured = r.featured === 'yes' || (companion && companion.featured === 'yes');
@@ -109,7 +145,7 @@ function loadItems() {
     items.push({
       id: r.filename, stem: C.stemOf(r.filename), kind, w, h, aspect: w / h,
       src: m ? m.path : C.webRel(C.BUILD, kind === 'still' ? C.tilePath(r.filename) : C.clipPath(r.filename)),
-      featured: !!featured, anchor: !!featured || kind === 'video', moving: kind !== 'still',
+      featured: !!featured, anchor: !!featured || (kind === 'video' && CONFIG.mixedTiles), moving: kind !== 'still',
       wide: w / h > CONFIG.wideAloneRatio,
       duration, start: +o.start || 0, trimStart: +o.trimStart || 0, trimEnd: +o.trimEnd || 0,
       slow: m && m.slow ? m.slow : 1, hdr: !!(m && m.hdr),
@@ -121,13 +157,29 @@ function loadItems() {
 
 // ---------------- sequence: sort, deal, ring ----------------
 const byKey = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+// mulberry32: a small seeded generator, so the shuffled order is the same on every machine for the same seed and set
+function mulberry32(a) {
+  return () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+// "shuffled": the items are shuffled by the seed, starting from their date order so media.csv's row order does not
+// matter, and each takes its shuffled position, zero-padded, as its ordering key: the deal and the row order then follow
+// the shuffle. _y = 0 on every item makes the chronology penalty and the pull gap inert. "chronological" is one chapter
+// (set where CONFIG is read); "chapters" is the ten mini-timelines. Nothing else in the layout knows the difference.
+function applyOrder(items) {
+  if (CONFIG.order !== 'shuffled') return;
+  const rnd = mulberry32(CONFIG.seed);
+  const order = items.slice().sort(byKey);
+  for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  order.forEach((it, i) => { it.key = String(i).padStart(6, '0'); it._y = 0; });
+}
 // Round-robin deal by date, stratified so every chapter gets its share of videos, featured stills and Live Photos/GIFs
 // (a plain deal left one chapter with 9 videos, where a two-row video gap is impossible). Each chapter stays date-ordered.
+// The strata are disjoint whether or not videos are anchors (mixed tiles off makes them plain moving items).
 function dealChapters(items) {
   const strata = [
     items.filter(it => it.kind === 'video'),
     items.filter(it => it.kind !== 'video' && it.anchor),
-    items.filter(it => !it.anchor && it.moving),
+    items.filter(it => it.kind !== 'video' && !it.anchor && it.moving),
     items.filter(it => !it.anchor && !it.moving),
   ];
   const chapters = Array.from({ length: CONFIG.chapters }, () => []);
@@ -201,7 +253,7 @@ function baseRow(work) {
   const items = [];
   if (work[0].wide) return { type: 'base', items: [work.shift()] };
   for (;;) {
-    fill(items, work, T, { feature: false, hasVideo: false });
+    fill(items, work, T, { feature: false, hasVideo: items.some(it => it.kind === 'video') });   // one video per row, base rows too (mixed tiles off puts videos here)
     if (!work.length) break;
     const c = work[0];
     if (items.length && c.chapter !== items[0].chapter) break;                 // chapter boundary: end the row here
@@ -351,7 +403,8 @@ function resplitChapterTails(rows) {
 
 // ---------------- spacing pass ----------------
 function chaptersContiguous(seq) {
-  // ring-aware: each chapter must be one contiguous block around the ring
+  // ring-aware: each chapter must be one contiguous block around the ring (with one chapter nothing can cross)
+  if (CONFIG.chapters === 1) return true;
   let runs = 0;
   for (let i = 0; i < seq.length; i++) if (seq[i].chapter !== seq[(i + seq.length - 1) % seq.length].chapter) runs++;
   return runs === CONFIG.chapters;
@@ -508,6 +561,8 @@ function geometry(rows) {
 function main() {
   const t0 = Date.now();
   const items = loadItems();
+  if (problems.length) { say('PREP PROBLEMS (nothing built):'); for (const p of problems) say('  X ' + p); process.exit(1); }
+  applyOrder(items);
   const seq0 = dealChapters(items);
   const { seq, rows, best, log } = spacingPass(seq0);
   geometry(rows);
@@ -523,7 +578,7 @@ function main() {
   rows.forEach((r, i) => {
     const width = r.placed.reduce((s, p) => s + p.w, 0) + G * (r.items.length - 1);
     if (width !== W) problems.push(`row ${i} width ${width}`);
-    if (r.type === 'feature' && r.items.filter(it => it.kind === 'video').length > 1) problems.push(`row ${i}: two videos`);
+    if (r.items.filter(it => it.kind === 'video').length > 1) problems.push(`row ${i}: two videos`);
     r.items.forEach(it => { if (it.anchor && r.type !== 'feature') problems.push(`${it.id}: anchor in a base row`); });
     if (r.type === 'base' && r.moving > CONFIG.maxBaseMoving) problems.push(`row ${i}: ${r.moving} moving tiles in a base row`);
     for (let d = 1; d < CONFIG.videoMinRowGap; d++) if (r.hasVideo && rows[(i + d) % rows.length].hasVideo) warnings.unshift(`rows ${i} and ${(i + d) % rows.length}: video rows ${d} apart (largest gap reachable within videoNudge ${CONFIG.videoNudge}; not a failure)`);
@@ -553,12 +608,19 @@ function main() {
     return { rows: rs.length, feature: rs.filter(r => r.type === 'feature').length, videos: rs.filter(r => r.hasVideo).length, items: rs.reduce((s, r) => s + r.items.length, 0) };
   });
 
+  // ---- the soundtrack for the live player: the tracks bin/prep made, only when prep-manifest.json matches show.json
+  const audioCfg = C.audioSettings();
+  const prepared = C.preparedAudio(C.readPrepManifest());
+  if (audioCfg.enabled && !prepared.enabled) warnings.push(`audio: ${prepared.why}; the live player stays silent (manifest audio.enabled false)`);
+  const audio = { enabled: prepared.enabled, files: prepared.tracks.map(t => t.path), loop: audioCfg.loop, volume: audioCfg.volume };
+
   // ---- manifest
   const itemIndex = new Map(items.map((it, i) => [it.id, i]));
   const manifest = {
     built: new Date().toISOString(), config: CONFIG,
     show: SHOW,                                   // handoff/show.json as read, for the record (null when the build fell back)
     loop: { height: loopHeight, seconds: loopSeconds, frames, speed },
+    audio,                                        // what the live player plays: build-relative m4a paths in play order
     items: items.map(it => ({
       id: it.id, stem: it.stem, kind: it.kind, w: it.w, h: it.h, src: it.src, duration: it.duration,
       start: it.start, trimStart: it.trimStart, trimEnd: it.trimEnd, featured: it.featured, anchor: it.anchor, moving: it.moving,
@@ -591,6 +653,7 @@ function main() {
     `${items.length} items: ${Object.entries(kinds).map(([k, v]) => `${v} ${k}`).join(', ')}`,
     `${rows.length} rows: ${feature} feature (${(100 * feature / rows.length).toFixed(0)}%), ${base} base; loop ${loopHeight} px = ${fmtTime(loopSeconds)} at ${speed.toFixed(3)} px/s (${frames} frames at ${CONFIG.renderFps} fps); max moving tiles in view ${maxInView}`,
     outputLine(),
+    tasteLine(),
     `knobs: ${Object.entries(CONFIG).filter(([k]) => !['viewportW', 'viewportH', 'background', 'frameFps', 'renderFps'].includes(k)).map(([k, v]) => `${k}=${v}`).join(' ')}`,
     `spacing moves: ${log.length}${log.length ? '\n  ' + log.join('\n  ') : ''}`,
     '',
@@ -620,17 +683,20 @@ function main() {
   // ---- report
   say(`build: ${items.length} items (${Object.entries(kinds).map(([k, v]) => `${v} ${k}`).join(', ')}), ${rows.length} rows: ${feature} feature = ${(100 * feature / rows.length).toFixed(0)}%, ${base} base`);
   say(`       ${outputLine()}`);
+  say(`       ${tasteLine()}`);
   say(`       loop ${loopHeight} px = ${fmtTime(loopSeconds)} at ${speed.toFixed(3)} px/s (${CONFIG.scrollSpeed} requested), ${frames} frames at ${CONFIG.renderFps} fps; max moving tiles in view ${maxInView} (cap ${CONFIG.movingCap})`);
   say(`       per chapter rows/feature/videoRows: ${perChapter.map(c => `${c.rows}/${c.feature}/${c.videos}`).join(' ')}`);
   const dist = kind => { const rs = rows.filter(r => r.type === kind); const hs = rs.map(r => r.h).sort((a, b) => a - b); const n = {}; rs.forEach(r => { n[r.items.length] = (n[r.items.length] || 0) + 1; }); return `${Object.entries(n).map(([k, v]) => `${v}x${k}`).join(' ')} items; h ${hs[0]}/${hs[hs.length >> 1]}/${hs[hs.length - 1]}`; };
   say(`       feature rows: ${dist('feature')}; base rows: ${dist('base')} (min/median/max)`);
   say(`       spacing: ${log.length} moves, ${best.adjacent} adjacent video rows, ${best.over} base rows over ${CONFIG.maxBaseMoving} moving, spread penalty ${best.spread.toFixed(3)}, disorder penalty ${best.disorder.toFixed(0)}`);
-  { // biggest backward date jumps left inside chapters, for the review
+  if (CONFIG.order === 'shuffled') say('       backward date jumps inside chapters: not measured (order shuffled; dates play no part)');
+  else { // biggest backward date jumps left inside chapters, for the review
     const jumps = []; let prev = null;
     rows.forEach((r, ri) => { for (const it of r.items) { if (prev && prev.chapter === it.chapter) { const back = yearOf(prev) - yearOf(it); if (back > 1.0) jumps.push({ back, s: `${back.toFixed(1)}y ${prev.id} -> ${it.id} (row ${ri})` }); } prev = it; } });
     jumps.sort((a, b) => b.back - a.back);
     say(`       backward date jumps inside chapters: ${jumps.filter(j => j.back > 1.5).length} over 1.5 yr, ${jumps.length} over 1 yr${jumps.length ? ' (largest: ' + jumps.slice(0, 3).map(j => j.s).join('; ') + ')' : ''}`);
   }
+  say(`       audio: ${audio.enabled ? `${audio.files.length} track(s) for the live player (${audio.files.map(f => path.posix.basename(f)).join(', ')}), ${audio.loop ? 'repeating' : 'once through'}, volume ${audio.volume}` : audioCfg.enabled ? 'not ready, see the warning below' : 'none' + (SHOW ? ' (show.json audio.enabled false)' : '')}`);
   say(`       ${playerNote}; manifest.json, sequence.txt written to ${C.rel(C.BUILD)} (${C.fmtSecs(Date.now() - t0)})`);
   const shown = warnings.filter(w => !/no prep output yet/.test(w));
   const missingPrep = warnings.length - shown.length;
@@ -640,6 +706,11 @@ function main() {
   say('       acceptance checks: all pass');
 }
 function fmtTime(s) { const m = Math.floor(s / 60); return `${m}m${String(Math.round(s - m * 60)).padStart(2, '0')}s`; }
+// the taste knobs that shape the sequence (show.json since 0.3, else the defaults)
+function tasteLine() {
+  const order = CONFIG.order === 'chronological' ? 'chronological (one chapter)' : CONFIG.order === 'shuffled' ? `shuffled (seed ${CONFIG.seed}, dealt into ${CONFIG.chapters} chapters)` : `chapters (${CONFIG.chapters} mini-timelines)`;
+  return `order ${order}; motion density: moving cap ${CONFIG.movingCap}, at most ${CONFIG.maxBaseMoving} moving per base row; mixed tiles ${CONFIG.mixedTiles ? 'on (featured stills and videos take feature rows)' : 'off (videos sit in the grid; feature rows for featured stills alone)'}`;
+}
 // the display and taste numbers this build ran with, and where they came from
 function outputLine() {
   const from = SHOW ? `handoff/show.json, ${SHOW.taste.tile_size} tiles, max tile height ${SHOW.taste.max_tile_height}` : 'first-run defaults, no handoff/show.json';

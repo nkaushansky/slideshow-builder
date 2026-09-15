@@ -151,6 +151,13 @@ def main(argv: list[str]) -> int:
                 return 2
             say("select: family gate requested but no identities available; using the presence gate (--allow-presence-gate)")
             gate = "people"
+    if gate == "people" and people and not any(str(r.get("persons", "")).strip() for r in people.values()):
+        # identify --tags-only leaves persons/faces blank on every row: the presence gate would have nothing to check
+        # and would pass every candidate; that must not happen in silence
+        say("select: the config asks for the people gate ([family] gate = \"people\") but people.csv carries no person "
+            "counts: identify ran with --tags-only. Run `python curate/run.py identify --force` with the detection models "
+            "from Step 0, or set [family] gate = \"family\" (the export's people tags) or \"none\" in config.toml.")
+        return 2
 
     byname = {r["filename"]: r for r in items}
 

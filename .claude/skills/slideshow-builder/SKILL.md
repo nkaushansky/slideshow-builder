@@ -12,34 +12,34 @@ You are building a photo slideshow or a curated set from the user's own photos, 
 Do not touch a file until the intake is answered. Ask all of the questions below in **one message**, grouped as shown, with the default in brackets where one exists. Accept "default" as an answer. Then write the answers to `project/intake.md` and the machine-readable parts to `project/config.toml`. The full question set with the reasoning behind each is in `references/00-intake.md`; ask it as written.
 
 **Source**
-1. Where are the photos, and in what form: Google Takeout zips, an Apple Photos export, iCloud download, a folder tree, or a mix? Give the path or paths.
+1. Where are the photos, and in what form: Google Takeout zips (kind `takeout`) or the unzipped Takeout folder (kind `folder`), an Apple Photos export, iCloud download, a folder tree, or a mix? Give the path or paths. For Apple Photos, export with File > Export > Export Unmodified Originals and tick "Export IPTC as XMP", so dates, places and the names of people travel with the files as .xmp sidecars.
 2. Roughly how many files and how many years, if you know.
 3. Are there other sources with photos that should be considered: other family members' phones, an old backup, printed-calendar exports, shared albums?
 
 **Machines**
 4. What machine will run this build: operating system and version, chip, memory, free disk?
-5. What machine will show the slideshow, if different: operating system, screen size and resolution, and how it will play (VLC, a browser, a TV)? [the build machine; Step 0 detects its display] The answer lands in `[output] resolution` and `[output] fps` in `config.toml`; when the display is the build machine, leave the resolution to Step 0.
+5. What machine will show the slideshow, if different: operating system, screen size and resolution, and how it will play: VLC on a computer, a TV playing from a USB stick, or a browser? [the build machine, VLC; Step 0 detects its display] The answer lands in `[output] resolution` and `[output] fps` and in `[machines] player` (`vlc`, `tv-usb` or `browser`) in `config.toml`; `tv-usb` makes the render pick the H.264 level a TV stick decodes and warn about files of 4 GiB and over; `browser` has kiosk launchers of its own; when the display is the build machine, leave the resolution to Step 0.
 6. Are Python, Node, ffmpeg and Google Chrome installed on the build machine? [I will check; answer only if you know something is missing]
 
 **The show**
 7. What is the event, the date, and the hard stop for a finished file? [hard stop = two days before]
 8. Where will the screen be, how far away will people stand, will anyone be attending it, how long does it need to run, and is there internet? [unattended, offline, the length of the reception] Tile size small, medium or large? [medium; large for a wall seen from across the room]
-9. Who owns the room's sound? Should the slideshow have audio? [no audio; music is planned, so say what you want and it is recorded]
+9. Who owns the room's sound? Should the slideshow have music? [no audio] Music: the files in play order, whether to repeat them until the loop ends, crossfade and fade seconds, and the volume; they go to `[audio]` in `config.toml` and the render lays them under the video; the DJ's sound is the alternative.
 
 **The people**
-10. Who is the show about: one honoree, a couple, a family? Name the people who "count" as family for the selection, so that photos with none of them in frame can be dropped. A show with no people requirement (a place, a trip's scenery) sets the people gate to `none`.
-11. Can you provide 5 to 20 clear photos of each of those people, or does your Takeout already carry people tags? [both, if possible]
+10. Who is the show about: one honoree, a couple, a family? Name the people who "count" as family for the selection, so that photos with none of them in frame can be dropped; spell the names as the photo app does (a one-word name such as `Sam` also matches a tag such as `Sam Jones`). A show with no people requirement (a place, a trip's scenery) sets the people gate to `none`.
+11. Can you provide 5 to 20 clear photos of each of those people, or does your export already carry people tags (a Google Takeout does; an Apple export does with "Export IPTC as XMP" ticked)? [both, if possible] The tags feed the family gate (`[family] gate = "family"`) through `identify --tags-only`, which needs no detection models; run the plain `identify` whenever the models from Step 0 are installed, because only it fills the person count and person area that the `people` gate, the v4 score and the featured gate use (on a tags-only `people.csv`, select refuses `gate = "people"` and names the choices). The seed photos are recorded for the face-matching milestone.
 
 **Scope and theme**
-12. Which years or dates? [the honoree's whole life, or the whole export]
+12. Which years or dates? [the honoree's whole life, or the whole export] Dates go to `[show] scope_start` and `scope_end`, which pro-rate the first and last years' caps from their months; whole years go to `first_year` and `last_year`; with neither, the birth year and the event year stand in.
 13. Is this a whole-life show, or a theme: a trip, a sport, a tradition, a place, a group of people? [whole life]
 14. Any must-include photos or events, and anything off limits? [none; the family decides what is off limits] Either list takes filenames, media ids, or a folder of photos. Off-limits files are excluded by select and refused by the apply tool; must-include files are seated like pins.
-15. How many moments do you want on screen, roughly, or should the cap fall out of the loop length? [a cap per year, pro-rated for partial years; about 450 to 500 moments for a 15-minute loop]
+15. How many moments do you want on screen, roughly, or should the cap fall out of the loop length? [derived from the loop length target (`[show] loop_minutes_target`, 15 minutes) and the tile size, pro-rated for partial years; or a cap per year in `[selection] cap_per_year`, with `[selection.cap_overrides]` for single years]
 
 **Taste** (defaults are what worked on the first run)
-16. Mixed tile sizes with occasional larger tiles, no full-screen singles? [yes] (recorded; this version does not act on it)
-17. Live Photos play in full, videos play silently, nothing pauses the scroll? [yes] (recorded; this version does not act on it: Live Photos always play in full and clips are always silent)
-18. Chronological within short chapters that each sweep the whole span, rather than one long timeline? [yes]
+16. Mixed tile sizes with occasional larger tiles, no full-screen singles? [yes] No means no featured picks and videos in the grid, every row a base row.
+17. Live Photos as clip or still? [clip] Videos and GIFs included? [yes] Slow motion as the phone shows it, or at real time? [slow] Clips are always silent and nothing pauses the scroll.
+18. Order: chronological within short chapters that each sweep the whole span, one long timeline, or shuffled? [chapters] Motion density: calm, normal or busy, at most 2, 4 or 6 tiles moving at once? [normal]
 19. Captions? [none] (recorded; this version does not act on it)
 20. Anything else you already know you want or hate? Verbatim.
 
@@ -48,7 +48,7 @@ Do not touch a file until the intake is answered. Ask all of the questions below
 22. Where should the working folder live, and what should be deleted when the event is over? [beside the export; delete derived copies, keep the index and the final video]
 23. Consent: nothing leaves the machine, and you are entitled to use these photos for this purpose. [confirm]
 
-After the answers, run **Step 0, the environment check**, from `references/01-stages.md`: `python curate/setup.py --project <folder> --apply` detects the operating system, Python, Node, ffmpeg, Chrome and VLC with versions, checks disk space, detects the machine's timezone and the logical resolution of its display, and writes them, with `[machines] build_os`, into `config.toml` where the intake left them blank. Ask for whatever it could not detect. Look inside the export for sidecars and HEIC/HEVC share, and report what you found and what must be installed, with pinned versions. Then fill `references/07-decided-brief-template.md` into `project/BRIEF.md`. From here on, every decision is a dated line in the brief's changelog.
+After the answers, run **Step 0, the environment check**, from `references/01-stages.md`: `python curate/setup.py --project <folder> --apply` detects the operating system, Python, Node, ffmpeg, Chrome and VLC with versions, checks disk space, detects the machine's timezone and the logical resolution of its display, and writes them, with `[machines] build_os`, into `config.toml` where the intake left them blank. Ask for whatever it could not detect. Then run `python curate/run.py ingest --dry-run`, which counts the sidecars of every source (Takeout JSON inside the zips or beside the files, Apple .xmp) without copying anything, and report what it found and what must be installed, with pinned versions; the HEIC/HEVC share and the special cases (Live Photo pairs, HDR, slow motion, panoramas, tiny files, long videos) come out of the index stage and `HANDOFF.md`. Then fill `references/07-decided-brief-template.md` into `project/BRIEF.md`. From here on, every decision is a dated line in the brief's changelog.
 
 ## 1. The stages
 
@@ -56,15 +56,15 @@ Run them in order. Each stage is a command in `curate/` or `build/`; each reads 
 
 | Stage | What it does | Who acts |
 |---|---|---|
-| ingest | Copy, never move, into one flat working folder; hash every file; assign stable IDs; verify by flags | Claude |
+| ingest | Copy, never move, into one flat working folder; index the sidecars, inside Takeout zips or beside the files (Takeout JSON, XMP); hash every file; assign stable IDs; verify by flags | Claude |
 | index | Sidecars first, then EXIF, container times, dimensions after orientation, duration, codec, perceptual hash, sharpness; pair Live Photos; find bursts and duplicates; settle a date with precision, confidence and a witness | Claude |
 | validate | The gates in `references/03-validation-gates.md`; writes flags, never silently fixes | Claude, owner resolves flags |
-| identify | Who is in frame: people tags from the export plus face embeddings from the seed photos; person area and group size | Claude |
-| select | Build the candidate pool from the scope or theme, apply the cap, run the four lenses and the consensus pass, choose featured picks | Claude |
+| identify | Who is in frame: the export's people tags matched against the family names (`--tags-only` needs no models and serves the family gate only), plus person and face detection for presence, person area and group size | Claude |
+| select | Build the candidate pool from the scope, leave out the types the taste excludes, apply the cap (derived from the loop length target, or set per year), run the four lenses and the consensus pass, choose featured picks | Claude |
 | review | Numbered contact sheets of the proposed cut, approval and edits by number, alternates on request; a PDF of the sheets for an owner who is not at the machine | **Owner checkpoint 1** |
 | handoff | Freeze the set as the index contract: `media/`, `media.csv`, `features.txt`, `cut-list.csv`, `inventory.md`, `HANDOFF.md`, `show.json`; the accounting invariant must balance | Claude |
-| build | Prepare tiles and clips, build the sequence and rows, open the live player for one review round, apply flags through the change ledger | **Owner checkpoint 2** |
-| render | Test render (labelled when the owner is not at the machine), full render of exactly one loop with the wrap proved, concat for playback, soak, launcher; then the full watch | **Owner checkpoint 3** |
+| build | Prepare tiles, clips and the music tracks, build the sequence and rows in the chosen order, open the live player for one review round, apply flags through the change ledger | **Owner checkpoint 2** |
+| render | Test render (labelled when the owner is not at the machine), full render of exactly one loop with the wrap proved, the soundtrack muxed on when there is music, concat for playback, soak, launcher; then the full watch | **Owner checkpoint 3** |
 
 The three checkpoints are stops. At each one, present what the owner needs to see, wait for their answer, apply it, and record it.
 

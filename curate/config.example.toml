@@ -6,14 +6,14 @@
 # Nothing here is uploaded anywhere; it stays in the project folder with the photos.
 
 [project]
-name = "my-slideshow"
+name = "my-slideshow"         # recorded; not read by this version
 timezone = "UTC"              # IANA zone used to read video container timestamps (e.g. "Europe/Berlin")
 work = "work"                 # flat working copy of every source file, plus quarantine subfolders
 index = "index"               # items.csv, flags.csv, people.csv, selection.csv, sheets/
 handoff = "handoff"           # the frozen set: media/, media.csv, features.txt, cut-list.csv, changes.log
 build = "build"               # tiles/, clips/, frames/, player.html, renders
 
-# One entry per place the photos come from. kind: takeout | apple-photos | icloud | folder
+# One entry per place the photos come from. kind: takeout (the zips) | apple-photos | icloud | folder (a folder tree, an unzipped Takeout included: its JSON sidecars beside the files are read)
 [[sources]]
 path = "sources/takeout"
 kind = "takeout"
@@ -30,17 +30,17 @@ birth_month = 1               # 1-12; pro-rates the first year's cap
 [family]
 names = ["the honoree"]       # the people who count as family for the selection
 gate = "people"               # none: no people check. people: any person in frame passes. family: the identify stage must see one of the names
-seed_photos = "seeds"         # folder with <name>/*.jpg, 5 to 20 clear photos per person, for the identify stage; recorded, not read by 0.2 (identity is a later milestone)
+seed_photos = "seeds"         # folder with <name>/*.jpg, 5 to 20 clear photos per person, for the identify stage; recorded, not read by this version (the face-matching milestone)
 
 [show]
 event = "the event"
 event_date = 2000-01-01
-hard_stop = 2000-01-01        # last day a finished file may still be produced; default two days before the event
+hard_stop = 2000-01-01        # last day a finished file may still be produced; recorded, not read by this version
 # scope_start = 2000-09-01    # first day of the scope (a TOML date); its year and month set the first year and pro-rate its cap
 # scope_end = 2013-06-30      # last day of the scope; its year and month set the last year and pro-rate its cap
 first_year = 2000             # scope; defaults to the honoree's birth year
 last_year = 2000              # scope; defaults to the event year
-theme = "whole-life"          # recorded; not read by 0.2 (whole-life | trip | activity | stage | people | traditions, see references/04)
+theme = "whole-life"          # recorded; not read by this version (whole-life | trip | activity | stage | people | traditions, see references/04)
 playback = "loop"             # recorded; play-once is planned
 loop_minutes_target = 15      # the loop length the cap is derived from when cap_per_year = 0
 must_include = []             # filenames or media_ids the owner named; select seats them like pins and warns about a miss
@@ -64,7 +64,7 @@ featured_fraction = 0.1667    # about one in six stills take larger tiles
 featured_min_per_year = 2
 motion_per_month = 1          # one video or Live Photo per month before the general pool
 
-# [selection.cap_overrides]   # a year's cap after pro-rating; keys are years, values whole numbers
+# [selection.cap_overrides]   # a year's cap after pro-rating; keys are years in the scope, values whole numbers
 # 2020 = 3
 
 [selection.weights]           # the v4 score; each 0 or more, normalised to sum 1 when they do not
@@ -131,10 +131,10 @@ include_videos = true         # false: no standalone videos in the show (cut as 
 include_gifs = true           # false: no animated GIFs (cut as excluded-type)
 live_photos = "clip"          # clip | still
 slow_motion = "slow"          # slow | realtime; per-file exceptions in <project>/prep-options.json
-seed = 20260905               # the shuffled order and the build's dealing are deterministic functions of it
-videos_silent = true          # recorded; not read by 0.2 (clips are always silent)
+seed = 20260905               # read only by order = "shuffled": the same seed gives the same shuffled sequence
+videos_silent = true          # recorded; not read by this version (clips are always silent)
 chapters = 0                  # 0 = ten chapters; any other value is used by the build
-captions = "none"             # recorded; not read by 0.2
+captions = "none"             # recorded; not read by this version
 
 [machines]
 build_os = ""                 # filled by Step 0
@@ -148,7 +148,7 @@ person_detector = ""
 person_input_size = 640
 person_class_index = 0
 face_detector = ""
-face_embedder = ""
+face_embedder = ""           # recorded; not read by this version (the face-matching milestone)
 
 [tools]
 # Blank = found on PATH, or in the repository's tools/ffmpeg/ for ffmpeg and ffprobe. Set a path by hand when a tool
@@ -156,4 +156,4 @@ face_embedder = ""
 ffmpeg = ""
 ffprobe = ""
 chrome = ""
-vlc = ""                      # recorded; not read by 0.2 (Step 0 and the launchers find VLC on their own)
+vlc = ""                      # recorded; not read by this version (Step 0 and the launchers find VLC on their own)

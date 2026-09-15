@@ -142,7 +142,8 @@ def plan_folder(src_root: Path, kind: str, source_label: str, tz) -> tuple[list[
 def plan_takeout(src_root: Path, source_label: str, sidecar_out: Path, dry: bool) -> tuple[list[dict], list[dict]]:
     zips = [str(src_root)] if src_root.is_file() and src_root.suffix.lower() == ".zip" else _takeout.list_zips(str(src_root))
     if not zips:
-        raise SystemExit(f"ingest: Takeout source {src_root} holds no .zip files")
+        raise SystemExit(f"ingest: Takeout source {src_root} holds no .zip files; an unzipped Takeout is kind = \"folder\" "
+                         "(its JSON sidecars beside the files are read the same way)")
     t0 = time.time()
     rows, media_by_member = _takeout.index_sidecars(
         zips, progress=lambda z, ns, nm: say(f"  sidecars: {z}: {ns} sidecars, {nm} media members so far"))

@@ -1,6 +1,7 @@
 @echo off
 REM Slideshow launcher for Windows. Double-click to start.
-REM Plays the rendered file from this same folder in VLC: fullscreen, looping, no OSD, no audio. The concatenated render
+REM Plays the rendered file from this same folder in VLC: fullscreen, looping, no OSD, sound on (a silent render plays
+REM nothing; a render with music plays it, so set the venue's volume first). The concatenated render
 REM slideshow-x<N>.mp4 (bin\render --concat; the first in name order) is preferred, then the single loop slideshow.mp4.
 REM Set SLIDESHOW_FILE to play a different file. To stop: press Esc in VLC, then close VLC (Ctrl+Q).
 REM Turn off screen sleep in Windows power settings, or run this from a session that holds a
@@ -24,4 +25,4 @@ if not defined VLC (
   exit /b 1
 )
 taskkill /IM vlc.exe /F >nul 2>&1
-start "" "%VLC%" --fullscreen --repeat --no-osd --no-video-title-show --no-audio "%FILE%"
+start "" "%VLC%" --fullscreen --repeat --no-osd --no-video-title-show "%FILE%"
