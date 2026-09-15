@@ -1,14 +1,17 @@
-"""show: write handoff/show.json from config.toml, the display, taste and off-limits settings the build reads.
+"""show: write handoff/show.json from config.toml, the display, taste, music, selection and off-limits settings the build reads.
 
     python curate/run.py show [--project P] [--dry-run]
 
 Every number the JavaScript side needs (viewport, frame rate, row heights, gutter, scroll speed,
-background, concat copies, quality preset) is derived in common.py from [output] and [taste] in
-config.toml, so the build only reads numbers; the rules are in references/02-index-contract.md.
-[show] off_limits is resolved to media_ids and filenames so the apply tool can refuse them. The
-handoff stage writes the same file; run this stage alone after changing config.toml so the build
-side sees the change without a new handoff. A bad value exits with the key name and what it
-accepts. Dry-run prints the derived values and writes nothing.
+background, concat copies, quality preset), the taste knobs (order, motion density, mixed tiles,
+videos, GIFs, Live Photos, slow motion, seed), the music ([audio], every file resolved and checked)
+and the cap plan ([selection] cap_per_year, or derived from [show] loop_minutes_target and the tile
+size) are derived in common.py from config.toml, so the build only reads numbers; the rules are in
+references/02-index-contract.md. [show] off_limits is resolved to media_ids and filenames so the
+apply tool can refuse them. The handoff stage writes the same file; run this stage alone after
+changing config.toml so the build side sees the change without a new handoff. A bad value exits
+with the key name and what it accepts. Dry-run prints the derived values, the cap plan included,
+and writes nothing.
 """
 from __future__ import annotations
 

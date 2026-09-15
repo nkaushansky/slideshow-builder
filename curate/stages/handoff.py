@@ -10,6 +10,11 @@ build reads; `python curate/run.py show` writes it alone). Creates an empty chan
 there is none and never truncates an existing one. Prints the accounting invariant and exits
 non-zero if it does not balance: rows in media.csv + rows in cut-list.csv = files in the index,
 every file exactly once.
+
+With `[taste] live_photos = "still"` select cuts every Live Photo clip (reason excluded-type) and
+the still is written to media.csv as `type = still` with no companion; the companion symmetry
+check skips those rows, the invariant is unchanged (the clip is a cut-list row) and HANDOFF.md
+names the count.
 """
 from __future__ import annotations
 
@@ -54,6 +59,7 @@ def main(argv: list[str]) -> int:
     show = P.show_settings(show_warnings)
     for w in show_warnings:
         say("  !", w)
+    live_still = show["taste"]["live_photos"] == "still"
 
     for need in ("items.csv", "selection.csv", "cut-list.csv"):
         if not (P.index / need).is_file():
@@ -90,6 +96,7 @@ def main(argv: list[str]) -> int:
     # every FILE exactly once: keyed by filename, because a parked exact duplicate shares its keeper's media_id
     sel_ids = {r["filename"] for r in selected}
     cut_ids = [r["filename"] for r in cuts]
+    cut_set = set(cut_ids)
     problems = []
     dup_cut = [k for k, v in collections.Counter(cut_ids).items() if v > 1]
     if dup_cut:
@@ -104,9 +111,18 @@ def main(argv: list[str]) -> int:
     unknown = [m for m in cut_ids if m not in byname]
     if unknown:
         problems.append(f"{len(unknown)} cut-list row(s) are not in items.csv")
+    if live_still:
+        stale = [it["filename"] for it in selected if it.get("type") == "livephoto-video"]
+        if stale:
+            problems.append(f"[taste] live_photos = \"still\" but {len(stale)} Live Photo clip(s) are selected (e.g. {stale[0]}); re-run select")
+    # stills whose clip was cut because the show plays Live Photos as stills: written as plain stills
+    as_still = {it["filename"] for it in selected if live_still and it.get("type") == "livephoto-still"
+                and it.get("companion") and it["companion"] in cut_set}
     for it in selected:
         c = it.get("companion", "")
         if c:
+            if it["filename"] in as_still:
+                continue   # the clip is a cut-list row; media.csv carries this one as a still with no companion
             other = byname.get(c)
             if other is None or other["filename"] not in sel_ids:
                 problems.append(f"companion of {it['filename']} ({c}) is not in the set")
@@ -151,6 +167,9 @@ def main(argv: list[str]) -> int:
         to_copy.append(it)
     total_bytes = sum(inum(it.get("bytes")) for it in selected)
     say(f"  media/: {verified} already verified, {len(to_copy)} to copy, {_human(total_bytes)} in the set")
+    if as_still:
+        say(f"  Live Photos as stills: {len(as_still)} livephoto-still row(s) go into media.csv as type still with no companion "
+            f"([taste] live_photos = \"still\"; their clips are cut-list rows)")
     if a.dry_run:
         say(f"handoff: dry run; would copy {len(to_copy)} file(s) and write media.csv ({n_media} rows), features.txt "
             f"({len(featured)} lines), cut-list.csv ({n_cut} rows), inventory.md, HANDOFF.md, {SHOW_JSON_NAME} into {P.handoff}")
@@ -191,8 +210,10 @@ def main(argv: list[str]) -> int:
     media_rows = []
     for it in selected:
         s = sel_by_name.get(it["filename"], {})
+        plain = it["filename"] in as_still
         media_rows.append(dict(
-            media_id=it["media_id"], filename=it["filename"], type=it.get("type", ""), companion=it.get("companion", ""),
+            media_id=it["media_id"], filename=it["filename"], type="still" if plain else it.get("type", ""),
+            companion="" if plain else it.get("companion", ""),
             width=it.get("width", ""), height=it.get("height", ""), duration_s=it.get("duration_s", ""),
             fps=it.get("fps", ""), hdr=it.get("hdr", ""), date=it.get("date", ""), precision=it.get("precision", ""),
             date_source=it.get("date_source", ""), date_witness=it.get("date_witness", ""),
@@ -256,15 +277,22 @@ def main(argv: list[str]) -> int:
          f"{len(featured)} featured stills; `cut-list.csv` carries the {len(cuts)} files considered and not kept, with one-word reasons.",
          f"- The accounting invariant balances: {len(media_rows)} + {len(cuts)} = {len(items)} indexed files.",
          f"- `changes.log` is {'present and untouched' if log.stat().st_size else 'empty'}; every change from here on goes through the apply tool.",
-         f"- `{SHOW_JSON_NAME}` carries the display, taste and off-limits settings the build reads: {show['output']['width']}x{show['output']['height']} "
-         f"at {show['output']['fps']} fps, {show['taste']['tile_size']} tiles, off-limits resolved to {len(show['off_limits']['media_ids'])} media id(s) "
-         f"and {len(show['off_limits']['filenames'])} filename(s). Re-run `python curate/run.py show` after changing config.toml.", "",
+         f"- `{SHOW_JSON_NAME}` carries the display, taste, music, selection and off-limits settings the build reads: "
+         f"{show['output']['width']}x{show['output']['height']} at {show['output']['fps']} fps, {show['taste']['tile_size']} tiles, "
+         f"order {show['taste']['order']}, Live Photos as {show['taste']['live_photos']}, "
+         f"music {('on, ' + str(len(show['audio']['files'])) + ' file(s)') if show['audio']['enabled'] else 'off'}, "
+         f"cap {show['selection']['cap_per_year']} per year ({show['selection']['cap_source']}), off-limits resolved to "
+         f"{len(show['off_limits']['media_ids'])} media id(s) and {len(show['off_limits']['filenames'])} filename(s). "
+         f"Re-run `python curate/run.py show` after changing config.toml.", "",
          "## Special cases the build must handle", "",
          f"- HEIC stills: {heic}. Convert to JPEG during preparation (Pillow with pillow-heif on every platform).",
          f"- HEVC videos: {hevc}. Transcode clips to H.264 for the live player.",
          f"- 10-bit HDR videos: {hdr}. Tone-map to SDR BT.709.",
          f"- Slow motion (>= 100 fps): {len(slow)}. Play at 30 fps unless the per-file real-time switch says otherwise."
          + (" Files: " + ", ".join(r["filename"] for r in slow[:8]) if slow else ""),
+         f"- Live Photos played as stills: {len(as_still)}."
+         + (" Their clips are cut-list rows (reason excluded-type); the rows in `media.csv` are type still with no companion."
+            if as_still else ""),
          f"- Panoramas and extreme aspect ratios (> 2.4): {len(pano)}. Each takes a row alone."
          + (" Files: " + ", ".join(r["filename"] for r in pano[:8]) if pano else ""),
          f"- Tiny files (short side < 600 px): {len(tiny)}." + (" Files: " + ", ".join(r["filename"] for r in tiny[:8]) if tiny else ""),

@@ -36,23 +36,49 @@ seed_photos = "seeds"         # folder with <name>/*.jpg, 5 to 20 clear photos p
 event = "the event"
 event_date = 2000-01-01
 hard_stop = 2000-01-01        # last day a finished file may still be produced; default two days before the event
+# scope_start = 2000-09-01    # first day of the scope (a TOML date); its year and month set the first year and pro-rate its cap
+# scope_end = 2013-06-30      # last day of the scope; its year and month set the last year and pro-rate its cap
 first_year = 2000             # scope; defaults to the honoree's birth year
 last_year = 2000              # scope; defaults to the event year
 theme = "whole-life"          # recorded; not read by 0.2 (whole-life | trip | activity | stage | people | traditions, see references/04)
-loop_minutes_target = 15      # recorded; not read by 0.2
-audio = false                 # recorded; music is planned, not in 0.2
+playback = "loop"             # recorded; play-once is planned
+loop_minutes_target = 15      # the loop length the cap is derived from when cap_per_year = 0
 must_include = []             # filenames or media_ids the owner named; select seats them like pins and warns about a miss
 off_limits = []               # filenames, media_ids, or a file or folder path (every file in it); the family's call, the skill
                               # never decides this. select cuts these files and add-item refuses them
 
+[audio]                       # music under the show; the DJ's sound is the alternative (enabled = false)
+enabled = false               # true: the soundtrack is mixed into the rendered file and the live player plays it
+files = []                    # in play order, absolute or relative to this folder; .mp3 .m4a .aac .wav .flac .ogg .opus
+loop = true                   # repeat the playlist until it covers the video
+crossfade_s = 2               # seconds between consecutive tracks
+fade_s = 2                    # seconds of fade in at the start and out at the end of the soundtrack
+volume = 1.0                  # 0.0 to 2.0, applied to the soundtrack
+
 [selection]
 lens = "v4"                   # v1 quality | v2 people and motion | v3 breadth | v4 synthesis (recommended)
-cap_per_year = 33             # moments per year; a Live Photo pair costs one slot
-prorate_partial_years = true  # first year from birth_month, last year up to event_date
+cap_per_year = 0              # 0 = derive from [show] loop_minutes_target and the tile size; the first run used 33
+prorate_partial_years = true  # first year from scope_start or birth_month, last year up to scope_end or event_date
 diversity_distance = 26       # no pick within this perceptual distance of a seated pick
 featured_fraction = 0.1667    # about one in six stills take larger tiles
 featured_min_per_year = 2
 motion_per_month = 1          # one video or Live Photo per month before the general pool
+
+# [selection.cap_overrides]   # a year's cap after pro-rating; keys are years, values whole numbers
+# 2020 = 3
+
+[selection.weights]           # the v4 score; each 0 or more, normalised to sum 1 when they do not
+person_area = 0.40            # how much of the frame is people
+group = 0.10                  # person count, capped at six
+sharpness = 0.20              # Laplacian variance percentile within the year
+resolution = 0.15             # pixel-count percentile within the year
+consensus = 0.15              # how many of v1 to v3 chose the item
+
+[selection.featured]          # a still may take a larger tile only when it passes all of these
+max_people = 3                # at most this many people in frame
+min_short_side = 1000         # pixels
+min_long_side = 1500          # pixels
+min_sharpness_pct = 0.10      # sharpness percentile among the selected stills, 0 to 1
 
 [priors]
 # Owner-declared rules about the export, applied only as a prior and validated against files
@@ -60,6 +86,7 @@ motion_per_month = 1          # one video or Live Photo per month before the gen
 calendar_folder_year_rule = false     # a "<year> calendar" folder holds photos taken in <year + offset>
 calendar_folder_year_offset = -1
 filename_month_rule = false           # a month name inside a filename dates the file to that month
+folder_year_rule = false              # a four-digit year in a source folder's name dates its files to that year (precision year)
 
 # Recurring events the owner names. Seated before the general pool, tagged on the sheets.
 # Delete the examples you do not use; an empty section is fine.
@@ -97,8 +124,14 @@ scroll_speed = 0              # px/s at the output resolution; 0 = the first run
 background = "#07070F"        # near-black behind the tiles
 # base_row_height = 520       # pixels; uncomment to override the tile_size preset
 # feature_row_height = 820
-mixed_tiles = true            # recorded for a later version; not read by 0.2
-live_photos_full = true       # recorded; not read by 0.2 (Live Photos always play in full)
+order = "chapters"            # chapters | chronological | shuffled (shuffled is a deterministic function of seed)
+motion_density = "normal"     # calm | normal | busy: how many tiles move at once
+mixed_tiles = true            # false: no larger tiles, videos in the grid
+include_videos = true         # false: no standalone videos in the show (cut as excluded-type)
+include_gifs = true           # false: no animated GIFs (cut as excluded-type)
+live_photos = "clip"          # clip | still
+slow_motion = "slow"          # slow | realtime; per-file exceptions in <project>/prep-options.json
+seed = 20260905               # the shuffled order and the build's dealing are deterministic functions of it
 videos_silent = true          # recorded; not read by 0.2 (clips are always silent)
 chapters = 0                  # 0 = ten chapters; any other value is used by the build
 captions = "none"             # recorded; not read by 0.2
@@ -106,7 +139,7 @@ captions = "none"             # recorded; not read by 0.2
 [machines]
 build_os = ""                 # filled by Step 0
 display_os = ""               # the intake's answer; blank when it is the build machine
-player = "vlc"                # vlc | tv-usb | browser; only vlc has launchers in 0.2
+player = "vlc"                # vlc | tv-usb | browser: the VLC launchers; a TV stick's H.264 level and the 4 GB warning; Chrome kiosk launchers
 
 [models]
 # Blank = the setup step's defaults (YOLOv8n exported to ONNX, YuNet). See curate/models/README.md

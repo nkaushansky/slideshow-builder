@@ -7,11 +7,19 @@ Reads index/items.csv, index/people.csv and index/flags.csv; writes index/select
 index/cut-list.csv and index/_select-scores.json (the v4 scores the sheets use for alternates
 and replacement pools). Spec: references/04-selection-lenses.md and references/01-stages.md §5.
 
-The cap per year comes from the config (pro-rated by month for the partial first and last
-years); a Live Photo pair costs one slot and is represented by its still; no pick lands
-within the configured perceptual distance of one already seated; a bucket with no dissimilar
-candidate stays short. All four lenses are computed and written; `[selection] lens` (default
-v4) decides which one fills `selected`.
+The cap per year is `[selection] cap_per_year`, or derived from `[show] loop_minutes_target`
+and the tile size when that is 0 (`P.cap_plan()`, references/04); it is pro-rated by month for
+the partial first and last years of the scope and `[selection.cap_overrides]` replaces single
+years last. The stage prints the cap and its arithmetic on one line. A Live Photo pair costs one
+slot and is represented by its still; no pick lands within the configured perceptual distance
+of one already seated; a bucket with no dissimilar candidate stays short. All four lenses are
+computed and written; `[selection] lens` (default v4) decides which one fills `selected`;
+`[selection.weights]` and `[selection.featured]` tune the v4 score and the featured gate.
+
+The taste knobs that act here: `[taste] include_videos = false` cuts every video and
+`include_gifs = false` every animated GIF with reason `excluded-type`; `live_photos = "still"`
+cuts every Live Photo clip the same way and lets its still compete as a plain still;
+`mixed_tiles = false` means no featured picks.
 
 The owner's `[show] off_limits` (filenames, media_ids, or a file or folder path) is applied
 before any other test and cuts with reason `off-limits`; a Live Photo pair goes together.
@@ -29,11 +37,12 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import DATE_PREFIX_LEN, project, say  # noqa: E402
+from common import DATE_PREFIX_LEN, cap_line, fmt_num, project, say  # noqa: E402
 from stages._lenses import (CUT_COLS, SELECTION_COLS, STILL_TYPES, choose_featured, inum, km, lens_v1,  # noqa: E402
                             lens_v2, lens_v3, lens_v4, make_candidate, pscore, read_csv, write_csv)
 
-CUT_REASONS = ("off-limits", "over-cap", "no-family", "no-people", "undated", "superseded", "burst", "duplicate", "flagged")
+CUT_REASONS = ("off-limits", "over-cap", "no-family", "no-people", "undated", "unsupported", "excluded-type", "superseded",
+               "burst", "duplicate", "flagged")
 _DATE_PREFIXED = re.compile(r"^\d{4}-\d{2}-\d{2}_")
 
 
@@ -58,6 +67,17 @@ def _name_forms(r: dict) -> set[str]:
         forms.add(fname[DATE_PREFIX_LEN:].lower())
     forms.discard("")
     return forms
+
+
+def _excluded_type(t: str, knobs: dict, paired_clip: bool) -> str:
+    """What [taste] turned off for a row of this type: 'video', 'animated-gif' or 'livephoto-video', else ''."""
+    if t == "video" and not knobs["include_videos"]:
+        return "video"
+    if t == "animated-gif" and not knobs["include_gifs"]:
+        return "animated-gif"
+    if paired_clip and knobs["live_photos"] == "still":
+        return "livephoto-video"
+    return ""
 
 
 def _anchor_pick(matches: list[dict]) -> dict | None:
@@ -106,7 +126,21 @@ def main(argv: list[str]) -> int:
     frac = float(P.get("selection", "featured_fraction", 1 / 6))
     min_per_year = int(P.get("selection", "featured_min_per_year", 2))
     motion_per_month = int(P.get("selection", "motion_per_month", 1))
-    caps = P.year_caps()
+    config_warnings: list[str] = []
+    knobs = P.taste_knobs(config_warnings)
+    plan = P.cap_plan(warnings=config_warnings)
+    weights = P.selection_weights(config_warnings)
+    rules = P.featured_rules()
+    for w in config_warnings:
+        say("  !", w)
+    caps = P.year_caps(plan)
+    overrides = P.cap_overrides()
+    lp_still = knobs["live_photos"] == "still"
+    no_featured = ""
+    if not knobs["mixed_tiles"]:
+        frac, no_featured = 0.0, "[taste] mixed_tiles = false"
+    elif frac <= 0:
+        no_featured = "[selection] featured_fraction = 0"
     if gate == "family":
         have_identity = people is not None and any((r.get("family_present") or "") == "yes" for r in people.values())
         if not have_identity:
@@ -136,9 +170,11 @@ def main(argv: list[str]) -> int:
     candidates: list[dict] = []
     unknown_people = 0
     out_of_scope = 0
+    excluded: collections.Counter = collections.Counter()   # excluded-type cuts, by the type the taste turned off
     for r in items:
         mid, t, loc = r["media_id"], r.get("type", ""), r.get("location", "work")
-        if t == "livephoto-video" and r.get("companion") in byname:
+        paired_clip = t == "livephoto-video" and r.get("companion") in byname
+        if paired_clip and not lp_still:
             continue  # rides with its still
         if mid in off_ids:
             reason[mid] = "off-limits"
@@ -149,6 +185,11 @@ def main(argv: list[str]) -> int:
             continue
         if t == "other":
             reason[mid] = "unsupported"   # an extension outside common.STILL_EXT / VIDEO_EXT / GIF_EXT
+            continue
+        off_type = _excluded_type(t, knobs, paired_clip)
+        if off_type:
+            reason[mid] = "excluded-type"   # [taste] include_videos, include_gifs or live_photos = "still"
+            excluded[off_type] += 1
             continue
         if mid in blocked:
             reason[mid] = "flagged"
@@ -175,7 +216,7 @@ def main(argv: list[str]) -> int:
             if (p.get("family_present") or "") != "yes":
                 reason[mid] = "no-family"
                 continue
-        candidates.append(make_candidate(r, p))
+        candidates.append(make_candidate(r, p, live_as_still=lp_still))
 
     byyear: dict[int, list[dict]] = collections.defaultdict(list)
     for c in candidates:
@@ -261,7 +302,7 @@ def main(argv: list[str]) -> int:
         anch_y = {c["id"]: anchors[c["id"]] for c in L if c["id"] in anchors}
         S3 = lens_v3(L, budget, sim, anch_y)
         cons = {c["id"]: (c["id"] in S1.ids) + (c["id"] in S2.ids) + (c["id"] in S3.ids) for c in L}
-        S4, sc = lens_v4(L, budget, sim, pins, anch_y, cons, motion_per_month)
+        S4, sc = lens_v4(L, budget, sim, pins, anch_y, cons, motion_per_month, weights)
         for k, S in (("v1", S1), ("v2", S2), ("v3", S3), ("v4", S4)):
             ranks[k].update(S.ranks())
         tags4.update(S4.tags)
@@ -271,14 +312,15 @@ def main(argv: list[str]) -> int:
 
     # ---- featured picks among the selected stills
     stills = [c for c in candidates if c["id"] in chosen and c["type"] in STILL_TYPES]
-    feats, quotas = choose_featured(stills, frac, min_per_year, sim)
+    feats, quotas = choose_featured(stills, frac, min_per_year, sim, rules)   # nothing when frac is 0
     featured = {c["id"] for c in feats}
 
     # ---- rows
     sel_rows, cut_rows = [], []
     for r in items:
         mid, t = r["media_id"], r.get("type", "")
-        rides_with = byname.get(r.get("companion", "")) if t == "livephoto-video" else None
+        # a Live Photo clip rides with its still, except when the show plays stills only: then it is a cut row
+        rides_with = byname.get(r.get("companion", "")) if t == "livephoto-video" and not lp_still else None
         if rides_with is not None:
             sid = rides_with["media_id"]
             selected = sid in chosen
@@ -310,6 +352,11 @@ def main(argv: list[str]) -> int:
     n_cut = len(cut_rows)
     balance = n_sel_items + n_companions + n_cut == len(items)
     say(f"select: lens {lens}, gate {gate}, diversity distance {sim}, {len(candidates)} candidates of {len(items)} rows")
+    say("  " + cap_line(plan))
+    if overrides:
+        say("  cap overrides ([selection.cap_overrides]): " + ", ".join(f"{y} = {c}" for y, c in sorted(overrides.items())))
+    say(f"  taste: order {knobs['order']}; motion density {knobs['motion_density']}; mixed tiles {'yes' if knobs['mixed_tiles'] else 'no'}; "
+        f"videos {'yes' if knobs['include_videos'] else 'no'}; gifs {'yes' if knobs['include_gifs'] else 'no'}; Live Photos {knobs['live_photos']}")
     if gate == "none":
         say("  gate none: no people check ran; every dated candidate competed")
     if unknown_people:
@@ -327,14 +374,27 @@ def main(argv: list[str]) -> int:
     say(f"  off-limits {reasons.get('off-limits', 0)} ([show] off_limits resolves to {len(off['media_ids'])} media id(s) and "
         f"{len(off['filenames'])} filename(s)); pins {len(pins)} seated "
         f"({n_pinned['[pins] files']} from [pins] files, {n_pinned['[show] must_include']} from [show] must_include)")
+    n_excluded = reasons.get("excluded-type", 0)
+    if n_excluded:
+        what = {"video": "[taste] include_videos = false: {n} video(s)", "animated-gif": "include_gifs = false: {n} GIF(s)",
+                "livephoto-video": "live_photos = \"still\": {n} Live Photo clip(s), their stills compete as plain stills"}
+        say(f"  excluded-type {n_excluded}: " + "; ".join(what[k].format(n=v) for k, v in excluded.items() if v))
     say(f"  accounting: {n_sel_items} selected + {n_companions} pair videos + {n_cut} cut = "
         f"{n_sel_items + n_companions + n_cut} of {len(items)} rows {'OK' if balance else 'MISMATCH'}")
     n_videos = sum(1 for c in candidates if c["id"] in chosen and c["type"] == "video")
-    n_anchors = len(featured) + n_videos
-    say(f"  featured {len(featured)} + standalone videos {n_videos} = {n_anchors} layout anchors "
-        f"({(100 * n_anchors / n_sel_items) if n_sel_items else 0:.0f}% of items)")
-    say(f"  rough loop estimate: about {3 * n_sel_items // 60} min {3 * n_sel_items % 60:02d} s at the first run's pace "
-        f"(100 px/s on 1440 rows; [taste] scroll_speed scales it) (3 s per item, references/06); the build prints the real number")
+    if no_featured:
+        say(f"  {no_featured}: no featured picks; every still takes a base tile"
+            + (", and standalone videos ride in the grid" if not knobs["mixed_tiles"] else ""))
+    if knobs["mixed_tiles"]:
+        n_anchors = len(featured) + n_videos
+        say(f"  featured {len(featured)} + standalone videos {n_videos} = {n_anchors} layout anchors "
+            f"({(100 * n_anchors / n_sel_items) if n_sel_items else 0:.0f}% of items)")
+    else:
+        say(f"  layout anchors: none (mixed tiles off); standalone videos {n_videos}")
+    spi = plan["seconds_per_item"]
+    est = round(n_sel_items * spi)
+    say(f"  rough loop estimate: about {est // 60} min {est % 60:02d} s at {fmt_num(spi)} s per item "
+        f"({plan['tile_size']} tiles, {plan['scroll_speed']} px/s, references/04); the build prints the real number")
     if not balance:
         say("select: the accounting does not balance; nothing written")
         return 1

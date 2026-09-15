@@ -7,7 +7,9 @@ code was ported from the first run's select scripts with every constant moved to
 
 A candidate is a dict with: id, name, type, date, prec, year, month, day, px, sharp, area,
 n (person count), faces, bits (phash as a uint8 array or None), motion (standalone video or
-GIF), lp (a Live Photo still), lat, lon, known (people data present).
+GIF), lp (a Live Photo still whose clip plays; false when [taste] live_photos = "still"), lat,
+lon, known (people data present). The v4 score weights and the featured-pick rules default to
+common.V4_WEIGHTS and common.FEATURED_RULES; select passes the config's when it overrides them.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import VIDEO_EXT, write_atomic  # noqa: E402
+from common import FEATURED_RULES, V4_WEIGHTS, VIDEO_EXT, write_atomic  # noqa: E402
 
 # ---------------------------------------------------------------- CSV in the project's style
 
@@ -29,7 +31,7 @@ ITEMS_COLS = ["media_id", "filename", "original_name", "source_kind", "source_pa
               "companion", "width", "height", "duration_s", "fps", "hdr", "video_codec", "has_audio", "bytes",
               "date", "precision", "date_source", "date_witness", "exif_datetime_original", "container_time",
               "sidecar_time", "camera_make", "camera_model", "phash", "sharpness", "lat", "lon", "burst_group",
-              "duplicate_of", "pair_stem", "pair_dt_s", "pair_frame_dist"]
+              "duplicate_of", "pair_stem", "pair_dt_s", "pair_frame_dist", "people_tags"]
 PEOPLE_COLS = ["media_id", "filename", "persons", "person_area", "largest_person", "faces", "largest_face",
                "group_size", "people", "family_present"]
 FLAG_COLS = ["media_id", "filename", "gate", "severity", "detail", "suggested_action", "resolved_by", "resolved_on"]
@@ -137,7 +139,9 @@ def km(lat1, lon1, lat2, lon2) -> float:
 
 # ---------------------------------------------------------------- candidates
 
-def make_candidate(item: dict, person: dict | None) -> dict:
+def make_candidate(item: dict, person: dict | None, live_as_still: bool = False) -> dict:
+    """The record the lenses score. `live_as_still` ([taste] live_photos = "still") makes a Live
+    Photo still compete as a plain still: lp false, so no MOTION-LP seating."""
     d = item.get("date", "") or ""
     w, h = inum(item.get("width")), inum(item.get("height"))
     t = item.get("type", "")
@@ -149,7 +153,7 @@ def make_candidate(item: dict, person: dict | None) -> dict:
         "area": fnum((person or {}).get("person_area")), "n": inum((person or {}).get("persons")),
         "faces": inum((person or {}).get("faces")),
         "known": bool(person) and (str(person.get("persons", "")).strip() != ""),
-        "motion": t in MOTION_TYPES, "lp": t == "livephoto-still" and bool(item.get("companion")),
+        "motion": t in MOTION_TYPES, "lp": t == "livephoto-still" and bool(item.get("companion")) and not live_as_still,
         "lat": fnum(item.get("lat"), None) if item.get("lat") else None,
         "lon": fnum(item.get("lon"), None) if item.get("lon") else None,
         "companion": item.get("companion", "") or "",
@@ -333,12 +337,19 @@ def lens_v3(L: list[dict], budget: int, sim: int, anchors: dict[str, list[str]])
 
 
 def lens_v4(L: list[dict], budget: int, sim: int, pins: set[str], anchors: dict[str, list[str]],
-            consensus: dict[str, int], motion_per_month: int = 1) -> tuple[Seater, dict[str, float]]:
-    """Synthesis: pins, anchors, one motion item per month, then month round-robin over unused days."""
+            consensus: dict[str, int], motion_per_month: int = 1,
+            weights: dict[str, float] | None = None) -> tuple[Seater, dict[str, float]]:
+    """Synthesis: pins, anchors, one motion item per month, then month round-robin over unused days.
+
+    `weights` are the score's five weights, [selection.weights] normalised to sum 1; the defaults
+    are references/04's 0.40 person-area, 0.10 group, 0.20 sharpness, 0.15 resolution, 0.15 consensus.
+    """
+    w = {**V4_WEIGHTS, **(weights or {})}
     area = pct(c["area"] if c["known"] else 0.0 for c in L)
     grp = np.array([min(c["n"], 6) / 6 if c["known"] else 0.3 for c in L])
-    s = (0.40 * area + 0.10 * grp + 0.20 * pct(c["sharp"] for c in L) + 0.15 * pct(c["px"] for c in L)
-         + 0.15 * np.array([consensus.get(c["id"], 0) / 3 for c in L]))
+    s = (w["person_area"] * area + w["group"] * grp + w["sharpness"] * pct(c["sharp"] for c in L)
+         + w["resolution"] * pct(c["px"] for c in L)
+         + w["consensus"] * np.array([consensus.get(c["id"], 0) / 3 for c in L]))
     score = {c["id"]: float(s[i]) for i, c in enumerate(L)}
     S = Seater(budget, sim)
     byid = {c["id"]: c for c in L}
@@ -377,9 +388,16 @@ def lens_v4(L: list[dict], budget: int, sim: int, pins: set[str], anchors: dict[
 
 # ---------------------------------------------------------------- featured picks
 
-def choose_featured(stills: list[dict], fraction: float, min_per_year: int, sim: int) -> tuple[list[dict], dict]:
-    """About `fraction` of the selected stills, spread by year, day-diverse, both orientations."""
-    if not stills:
+def choose_featured(stills: list[dict], fraction: float, min_per_year: int, sim: int,
+                    rules: dict | None = None) -> tuple[list[dict], dict]:
+    """About `fraction` of the selected stills, spread by year, day-diverse, both orientations.
+
+    `rules` is the gate a still must pass to be eligible ([selection.featured]): max_people,
+    min_short_side, min_long_side, min_sharpness_pct; the defaults are 3, 1000, 1500 and 0.10.
+    A fraction of 0 (mixed tiles off) picks nothing.
+    """
+    ru = {**FEATURED_RULES, **(rules or {})}
+    if not stills or fraction <= 0:
         return [], {}
     sharps = sorted(c["sharp"] for c in stills)
     ress = sorted(c["px"] for c in stills)
@@ -387,8 +405,8 @@ def choose_featured(stills: list[dict], fraction: float, min_per_year: int, sim:
     for c in stills:
         n, faces = c["n"], c["faces"]
         people_ok = (not c["known"]) or n >= 1 or faces >= 1
-        ok = people_ok and n <= 3 and min(c["w"], c["h"]) >= 1000 and max(c["w"], c["h"]) >= 1500 \
-            and pct_of(c["sharp"], sharps) >= 0.10
+        ok = people_ok and n <= ru["max_people"] and min(c["w"], c["h"]) >= ru["min_short_side"] \
+            and max(c["w"], c["h"]) >= ru["min_long_side"] and pct_of(c["sharp"], sharps) >= ru["min_sharpness_pct"]
         score = (0.45 * min(c["area"], 0.8) / 0.8 + 0.20 * pct_of(c["sharp"], sharps) + 0.15 * pct_of(c["px"], ress)
                  + 0.10 * (1.0 if n <= 2 else 0.4) + 0.10 * (1.0 if faces > 0 else 0.0))
         cand.append(dict(c, ok=ok, fscore=score))
