@@ -57,7 +57,7 @@ Run them in order. Each stage is a command in `curate/` or `build/`; each reads 
 | Stage | What it does | Who acts |
 |---|---|---|
 | ingest | Copy, never move, into one flat working folder; index the sidecars, inside Takeout zips or beside the files (Takeout JSON, XMP); hash every file; assign stable IDs; verify by flags | Claude |
-| index | Sidecars first, then EXIF, container times, dimensions after orientation, duration, codec, perceptual hash, sharpness; pair Live Photos; find bursts and duplicates; settle a date with precision, confidence and a witness | Claude |
+| index | Sidecars first, then EXIF, container times, dimensions after orientation, duration, codec, perceptual hash, sharpness; pair Live Photos; find bursts and duplicates; settle a date with precision, the rung that settled it and a witness | Claude |
 | validate | The gates in `references/03-validation-gates.md`; writes flags, never silently fixes | Claude, owner resolves flags |
 | identify | Who is in frame: the export's people tags matched against the family names (`--tags-only` needs no models and serves the family gate only), plus person and face detection for presence, person area and group size | Claude |
 | select | Build the candidate pool from the scope, leave out the types the taste excludes, apply the cap (derived from the loop length target, or set per year), run the four lenses and the consensus pass, choose featured picks | Claude |
