@@ -29,8 +29,8 @@ birth_month = 1               # 1-12; pro-rates the first year's cap
 
 [family]
 names = ["the honoree"]       # the people who count as family for the selection
-gate = "people"               # "people": any person in frame passes. "family": the identify stage must see one of the names
-seed_photos = "seeds"         # folder with <name>/*.jpg, 5 to 20 clear photos per person, for the identify stage
+gate = "people"               # none: no people check. people: any person in frame passes. family: the identify stage must see one of the names
+seed_photos = "seeds"         # folder with <name>/*.jpg, 5 to 20 clear photos per person, for the identify stage; recorded, not read by 0.2 (identity is a later milestone)
 
 [show]
 event = "the event"
@@ -38,11 +38,12 @@ event_date = 2000-01-01
 hard_stop = 2000-01-01        # last day a finished file may still be produced; default two days before the event
 first_year = 2000             # scope; defaults to the honoree's birth year
 last_year = 2000              # scope; defaults to the event year
-theme = "whole-life"          # whole-life | trip | activity | stage | people | traditions (see references/04)
-loop_minutes_target = 15
-audio = false
-must_include = []             # filenames or descriptions the owner named; pinned on intake
-off_limits = []               # the family's call; the skill never decides this
+theme = "whole-life"          # recorded; not read by 0.2 (whole-life | trip | activity | stage | people | traditions, see references/04)
+loop_minutes_target = 15      # recorded; not read by 0.2
+audio = false                 # recorded; music is planned, not in 0.2
+must_include = []             # filenames or media_ids the owner named; select seats them like pins and warns about a miss
+off_limits = []               # filenames, media_ids, or a file or folder path (every file in it); the family's call, the skill
+                              # never decides this. select cuts these files and add-item refuses them
 
 [selection]
 lens = "v4"                   # v1 quality | v2 people and motion | v3 breadth | v4 synthesis (recommended)
@@ -81,18 +82,31 @@ files = { }                   # { 2020 = "2020-10-18_filename.jpg", 2021 = "..."
 [pins]
 files = []                    # owner pins: seated first, never dropped by a date correction
 
+[output]                      # the display the show plays on; layout, player and render all derive from these
+resolution = ""               # the display's LOGICAL resolution, "WxH". Blank: Step 0 (`python curate/setup.py --project
+                              # <folder> --apply`) writes the build machine's; for a different display machine the intake
+                              # writes its answer. Blank at build time means 2560x1440 (the first run) with a warning
+fps = 60                      # 30 or 60; 30 halves the render time and is what TVs and older laptops decode easily
+concat_copies = 3             # copies of the loop concatenated for playback, so the player's own seam lands rarely
+quality = "final"             # final (x264 slow, crf 18) | draft (veryfast, crf 23, for quick test renders)
+
 [taste]
-mixed_tiles = true            # mixed tile sizes with occasional larger tiles, no full-screen singles
-live_photos_full = true       # Live Photos play their whole clip and hold the last frame
-videos_silent = true
-chapters = true               # chronological inside short chapters that each sweep the whole span
-captions = false
+tile_size = "medium"          # small | medium | large: row heights as a share of the screen height; large for a wall
+                              # seen from across a room. medium is the first run's 520/820 px at 1440 rows
+scroll_speed = 0              # px/s at the output resolution; 0 = the first run's pace (100 px/s at 1440) scaled
+background = "#07070F"        # near-black behind the tiles
+# base_row_height = 520       # pixels; uncomment to override the tile_size preset
+# feature_row_height = 820
+mixed_tiles = true            # recorded for a later version; not read by 0.2
+live_photos_full = true       # recorded; not read by 0.2 (Live Photos always play in full)
+videos_silent = true          # recorded; not read by 0.2 (clips are always silent)
+chapters = 0                  # 0 = ten chapters; any other value is used by the build
+captions = "none"             # recorded; not read by 0.2
 
 [machines]
 build_os = ""                 # filled by Step 0
-display_os = ""
-display_resolution = ""       # e.g. "2560x1440"
-player = "vlc"                # vlc | browser | tv
+display_os = ""               # the intake's answer; blank when it is the build machine
+player = "vlc"                # vlc | tv-usb | browser; only vlc has launchers in 0.2
 
 [models]
 # Blank = the setup step's defaults (YOLOv8n exported to ONNX, YuNet). See curate/models/README.md
@@ -104,8 +118,9 @@ face_detector = ""
 face_embedder = ""
 
 [tools]
-# Blank = found on PATH. Step 0 fills these when a tool lives elsewhere (a static ffmpeg build, say).
+# Blank = found on PATH, or in the repository's tools/ffmpeg/ for ffmpeg and ffprobe. Set a path by hand when a tool
+# lives elsewhere; Step 0 reports where it found each tool but does not write this section.
 ffmpeg = ""
 ffprobe = ""
 chrome = ""
-vlc = ""
+vlc = ""                      # recorded; not read by 0.2 (Step 0 and the launchers find VLC on their own)

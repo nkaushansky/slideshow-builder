@@ -19,7 +19,7 @@ Do not skip the intake, do not touch their photos before it is answered, and nev
 - **Python 3.11 or newer**, **Node.js 20 or newer**, and **Google Chrome** on the build machine. **ffmpeg** too; on Windows the setup step downloads it for you.
 - **VLC** on the machine that will show the slideshow, if it is a different machine.
 - Free disk space of at least twice the size of your export.
-- Your photos as a **Google Takeout** (best, because its metadata sidecars carry capture times, places and people), an **Apple Photos** export, or a folder tree.
+- Your photos as a **Google Takeout** (best, because its metadata sidecars carry capture times, places and people), an **Apple Photos** export, or a folder tree. Accepted files: JPEG, HEIC/HEIF, PNG and WebP stills; MOV, MP4, M4V, AVI, MKV, MTS/M2TS, 3GP, WebM, WMV and MPEG videos; animated GIFs. Anything else is set aside and listed, never lost.
 - Git is optional. You can download the code as a zip instead.
 
 ## Getting started, step by step
@@ -72,17 +72,17 @@ Then type:
 
 > Let's build a slideshow from my photos.
 
-Claude reads the skill in this repository and starts with the intake: one message of questions about where the photos are, what machine builds and what machine shows the slideshow, the event and the room, who the show is about, the scope, and a few taste questions with sensible defaults in brackets. Answer them in one reply; "default" is a fine answer for any of them. Claude then checks the machine, writes the project folder, and works through the stages.
+Claude reads the skill in this repository and starts with the intake: one message of questions about where the photos are, what machine builds and what machine shows the slideshow, the event and the room, who the show is about, the scope, and a few taste questions with sensible defaults in brackets. Answer them in one reply; "default" is a fine answer for any of them. Claude then writes the project folder, checks the machine (it detects your timezone and your screen's resolution and records them, and asks only for what it could not detect), and works through the stages.
 
 ### 5. What happens next
 
 You will be asked to look at things three times, and each one is a real stop:
 
-1. **Contact sheets** of the proposed cut, one per year, numbered, so you can approve or swap by number. About an hour of your time.
-2. **The live player**, one round: it opens in Chrome, you click any tile you want swapped, and the swaps go through a change log.
+1. **Contact sheets** of the proposed cut, one per year, numbered, so you can approve or swap by number. About an hour of your time. If you are not at the machine, Claude bundles them into one PDF you can read anywhere.
+2. **The live player**, one round: it opens in Chrome, you click any tile you want swapped, and the swaps go through a change log. If you are not at the machine, a short labelled test render stands in: every tile carries its name and date, so you can name what to swap from the video.
 3. **The final video**, watched once all the way through before the event.
 
-Everything lands in a `project/` folder beside your export: the index, the sheets, the frozen set, the build and the render. The final file is `slideshow-x3.mp4`; a launcher script next to it plays it fullscreen and looping in VLC. After the event, the runbook in `references/09-runbook.md` says what to delete and what to keep.
+Everything lands in a `project/` folder beside your export: the index, the sheets, the frozen set, the build and the render. The final file is `slideshow-x3.mp4` (three copies of the loop back to back, so the player's own seam comes rarely; the count is a setting); a launcher script next to it plays it fullscreen and looping in VLC. After the event, the runbook in `references/09-runbook.md` says what to delete and what to keep.
 
 ### If you would rather hand the setup to Claude
 

@@ -6,7 +6,7 @@ Fill this into `project/BRIEF.md` after the intake and Step 0, before any buildi
 
 # <event> slideshow: build brief
 
-**State, <date>.** Build machine: <OS, chip, memory>. Display machine: <OS, screen, resolution, player>. Sources: <what, where, how many files, how many years, sidecars present or not>. Working folder: <path>. Set status: <not yet selected | proposed cut of N moments | frozen at N files / N moments>. Hard stop: <date>. Owner hours budget: <hours>.
+**State, <date>.** Build machine: <OS, chip, memory>. Display machine: <OS, screen, `[output] resolution` and `fps` as detected or answered, player>. Sources: <what, where, how many files, how many years, sidecars present or not>. Working folder: <path>. Set status: <not yet selected | proposed cut of N moments | frozen at N files / N moments>. Hard stop: <date>. Owner hours budget: <hours>.
 
 **One paragraph.** What is being built, where it plays, for whom, how long it runs, and the exact deliverable (an mp4 that loops in VLC; the browser player as fallback).
 
@@ -22,7 +22,8 @@ Fill this into `project/BRIEF.md` after the intake and Step 0, before any buildi
 
 - <OS and version, chip, memory, disk>
 - <Python, Node, ffmpeg, Chrome, VLC: versions, paths, how installed>
-- <Playwright: bundled browser or installed Chrome via channel>
+- <timezone and display resolution as Step 0 detected them, and whether `--apply` wrote them or the intake answered>
+- <Playwright: `[tools] chrome`, bundled browser or installed Chrome via channel>
 - <screenshot cost measured at the output resolution; sleep settings; keep-awake command>
 - <anything that failed and the fallback taken>
 
@@ -41,10 +42,10 @@ Fill this into `project/BRIEF.md` after the intake and Step 0, before any buildi
 | 3 | Large tiles | featured stills plus every video, no full-screen singles | heroes; promotion of videos | owner | |
 | 4 | Live Photos | full clip, hold, no bounce, autoplay as the tile | trim and ping-pong; still with hover | owner | |
 | 5 | Videos | feature rows, silent, scroll through, per-file start | full screen; paused scroll | owner | |
-| 6 | Captions | none | baked into tiles | owner | |
-| 7 | Audio | none | ambient in the quiet window | owner | |
-| 8 | Output | <resolution> at 60 fps mp4 in VLC, ×3 concat | live browser | build | |
-| 9 | Loop length | an output; expected <N> min at <speed> | a fixed target | build | |
+| 6 | Captions | none (recorded in `[taste] captions`; this version does not act on it) | baked into tiles | owner | |
+| 7 | Audio | none (recorded in `[show] audio`; music is planned, not in this version) | ambient in the quiet window | owner | |
+| 8 | Output | `[output]`: <resolution> at <fps> fps, quality <final or draft>, mp4 in VLC, ×<concat_copies> concat | live browser | build | |
+| 9 | Loop length | an output; expected <N> min at <speed> px/s (`[taste] scroll_speed`, 0 = the first run's pace scaled to `[output]` height) with <tile_size> tiles | a fixed target | build | |
 | 10 | Chronology versus spacing | chronology wins; `disorderWeight` <N> | spacing wins | owner | |
 
 ## Sequence, layout, motion, render
@@ -53,18 +54,18 @@ Copy the relevant sections of `references/06-layout-motion-render.md` and edit t
 
 ## Tuning knobs
 
-The config block with this show's values.
+The config block with this show's values: `[output]` and `[taste]` from `config.toml` as `python curate/run.py show` derived them (paste the numbers it printed), then the build script's own knobs.
 
 ## Build order
 
-0. Environment check; report.
+0. Environment check (`python curate/setup.py --project <folder> --apply`); report.
 1. Verify the handoff; print the invariant.
 2. Prepare tiles, clips, frames.
 3. Build the sequence; print counts and share.
 4. Live-player round with the owner (checkpoint 2).
 5. Apply flags through the ledger; rebuild; show the changes.
 6. 60-second test render; window renders around special cases.
-7. Full render; wrap check; ×3; soak.
+7. Full render; wrap check; `--concat` (×<concat_copies>); soak.
 8. Launcher; backup; the owner's full watch (checkpoint 3).
 9. Additions cutoff: <date, evening>. Final render that night. Hard stop: <date>.
 

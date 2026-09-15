@@ -4,13 +4,17 @@
 //   1. bin/frames (frame sequences for moving tiles at their row heights; skipped if present)
 //   2. serve the project over http://127.0.0.1 (a file:// page would taint the canvas) and open the player in headless Chrome
 //   3. warm the scheduler through one full loop so frame 0 already sits in a periodic state (seamless wrap)
-//   4. per frame: page updates to t = k/60, draws the visible tiles into a canvas, JPEG-encodes it (q 0.95) and sends it over
+//   4. per frame: page updates to t = k/fps, draws the visible tiles into a canvas, JPEG-encodes it (q 0.95) and sends it over
 //      a WebSocket; we pipe it into ffmpeg (image2pipe -> libx264) and ack once ffmpeg accepted it (backpressure)
 //   5. verify: frame count, size, fps, no audio; wrap check = PSNR between frame 0 and the frame after the last one
-// Chromium: Playwright's bundled build first, installed Google Chrome as the fallback (common.launchBrowser).
-// Usage: bin/render [--seconds N] [--from SECONDS] [--out FILE] [--preset slow|medium|...] [--crf N] [--q 0.95] [--skip-frames] [--x3] [--warm-loops N]
+// Chromium: [tools] chrome from config.toml, else Playwright's bundled build, else installed Google Chrome (common.launchBrowser).
+// Size and fps come from build/manifest.json (bin/build took them from handoff/show.json); the x264 preset/crf default from
+// show.json's output.quality (final: slow/18, draft: veryfast/23) and the concat copy count from output.concat_copies.
+// Usage: bin/render [--seconds N] [--from SECONDS] [--out FILE] [--preset slow|medium|...] [--crf N] [--q 0.95] [--skip-frames] [--labels] [--concat] [--warm-loops N]
 //   default renders exactly one loop to build/slideshow.mp4; --seconds 60 is the quick test render; --from 470 --seconds 40
 //   renders a window from inside the loop (the scheduler is stepped up to that point without drawing, so the state is right).
+//   --labels draws the review labels (filename, date, row, chapter) into every frame and names the file -labels, for an owner
+//   who is not at the machine; --concat (alias --x3) also writes slideshow-x<N>.mp4, N copies back to back, for the launchers.
 
 const fs = require('fs');
 const path = require('path');
@@ -20,8 +24,16 @@ const { spawn } = require('child_process');
 const C = require('./common');
 const { generateFrames } = require('./frames');
 
-const opt = { seconds: 0, from: 0, out: '', preset: 'slow', crf: 18, q: 0.95, skipFrames: false, x3: false, jobs: 0, warmLoops: 8 };
+// x264 settings per show.json output.quality; --preset/--crf on the command line override either
+const QUALITY = { final: { preset: 'slow', crf: 18 }, draft: { preset: 'veryfast', crf: 23 } };
+const SHOW = C.SHOW;
+const quality = SHOW ? String(SHOW.output.quality) : 'final';
+const concatCopies = SHOW ? SHOW.output.concat_copies : 3;
+const opt = { seconds: 0, from: 0, out: '', preset: '', crf: null, q: 0.95, skipFrames: false, labels: false, concat: false, jobs: 0, warmLoops: 8 };
 {
+  const usage = 'usage: bin/render [--seconds N] [--from SECONDS] [--out FILE] [--preset P] [--crf N] [--q 0.95] [--skip-frames] [--labels] [--concat] [--warm-loops N]';
+  if (!QUALITY[quality]) { console.error(`show.json output.quality "${quality}" is not final or draft; fix [output] quality in config.toml and run python curate/run.py show`); process.exit(2); }
+  if (!(Number.isInteger(concatCopies) && concatCopies >= 1)) { console.error(`show.json output.concat_copies ${JSON.stringify(concatCopies)} is not a whole number of copies; fix [output] concat_copies in config.toml and run python curate/run.py show`); process.exit(2); }
   const a = process.argv.slice(2);
   for (let i = 0; i < a.length; i++) {
     if (a[i] === '--seconds') opt.seconds = Number(a[++i]);
@@ -32,11 +44,15 @@ const opt = { seconds: 0, from: 0, out: '', preset: 'slow', crf: 18, q: 0.95, sk
     else if (a[i] === '--crf') opt.crf = Number(a[++i]);
     else if (a[i] === '--q') opt.q = Number(a[++i]);
     else if (a[i] === '--skip-frames') opt.skipFrames = true;
-    else if (a[i] === '--x3') opt.x3 = true;
+    else if (a[i] === '--labels') opt.labels = true;
+    else if (a[i] === '--concat' || a[i] === '--x3') opt.concat = true;
     else if (a[i] === '--jobs') opt.jobs = Number(a[++i]);
-    else { console.error('usage: bin/render [--seconds N] [--from SECONDS] [--out FILE] [--preset P] [--crf N] [--q 0.95] [--skip-frames] [--x3] [--warm-loops N]'); process.exit(2); }
+    else { console.error(usage); process.exit(2); }
   }
   if (opt.from && !opt.seconds) { console.error('--from needs --seconds N (a partial render starting there)'); process.exit(2); }
+  opt.tuned = !!opt.preset || opt.crf != null;
+  if (!opt.preset) opt.preset = QUALITY[quality].preset;
+  if (opt.crf == null) opt.crf = QUALITY[quality].crf;   // crf 0 (lossless) is a real choice, so null is the "not given" mark
 }
 const TYPES = { '.html': 'text/html', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.mp4': 'video/mp4', '.json': 'application/json' };
 const logLines = [];
@@ -90,8 +106,10 @@ async function main() {
   const fps = manifest.config.renderFps;
   const total = opt.seconds ? Math.round(opt.seconds * fps) : manifest.loop.frames;
   const k0 = Math.round(opt.from * fps);
-  const out = path.resolve(opt.out || path.join(C.BUILD, opt.seconds ? `test-${opt.from ? opt.from + 's-' : ''}${opt.seconds}s.mp4` : 'slideshow.mp4'));
-  log(`render: ${total} frames at ${fps} fps (${fmtTime(total / fps)})${k0 ? ` from frame ${k0} (t=${fmtTime(k0 / fps)})` : ''} -> ${C.rel(out)}; loop ${manifest.loop.frames} frames = ${fmtTime(manifest.loop.seconds)} at ${manifest.loop.speed.toFixed(3)} px/s; x264 ${opt.preset} crf ${opt.crf}, jpeg q ${opt.q}`);
+  const suffix = opt.labels ? '-labels' : '';           // a labelled render is never the file the launchers pick up
+  const out = path.resolve(opt.out || path.join(C.BUILD, opt.seconds ? `test-${opt.from ? opt.from + 's-' : ''}${opt.seconds}s${suffix}.mp4` : `slideshow${suffix}.mp4`));
+  log(`render: ${total} frames at ${fps} fps (${fmtTime(total / fps)})${k0 ? ` from frame ${k0} (t=${fmtTime(k0 / fps)})` : ''} -> ${C.rel(out)}; loop ${manifest.loop.frames} frames = ${fmtTime(manifest.loop.seconds)} at ${manifest.loop.speed.toFixed(3)} px/s; x264 ${opt.preset} crf ${opt.crf} (quality ${quality}${opt.tuned ? ', --preset/--crf given' : ''}), jpeg q ${opt.q}${opt.labels ? '; labels on' : ''}`);
+  if (!SHOW) log('handoff/show.json missing; quality final (x264 slow, crf 18) and 3 concat copies assumed; run `python curate/run.py show`');
   if (!fs.existsSync(path.join(C.BUILD, 'player.html'))) throw new Error('player.html missing; run bin/build');
 
   // 1. frames
@@ -146,7 +164,7 @@ async function main() {
   const ctx = await browser.newContext({ viewport: { width: manifest.config.viewportW, height: manifest.config.viewportH }, deviceScaleFactor: 1 });
   const page = await ctx.newPage();
   page.on('pageerror', e => log('page error: ' + e.message));
-  await page.goto(`${base}/player.html?render=1&q=${opt.q}`);
+  await page.goto(`${base}/player.html?render=1&q=${opt.q}${opt.labels ? '&labels=1' : ''}`);
   await page.evaluate(() => window.__ready);
   const info = await page.evaluate(() => window.__renderInfo());
   if (info.loop.frames !== manifest.loop.frames) throw new Error('player.html is out of date with manifest.json; run bin/build');
@@ -207,13 +225,15 @@ async function main() {
   }
   log(`max moving tiles in one frame: ${maxPlaying} (cap ${manifest.config.movingCap}); total ${fmtTime((Date.now() - t0) / 1000)}`);
 
-  // 7. x3
-  if (opt.x3 && !problems.length) {
+  // 7. concat: N copies of the loop back to back (show.json output.concat_copies), so the player's own seam lands once
+  //    per N loops; the launchers look for slideshow-x*.mp4 first
+  if (opt.concat && !problems.length) {
+    const N = concatCopies;
     const list = path.join(C.BUILD, 'concat-list.txt');
-    fs.writeFileSync(list, Array(3).fill(`file '${out.replace(/'/g, "'\\''")}'`).join('\n') + '\n');
-    const x3 = out.replace(/\.mp4$/, '-x3.mp4');
-    const r = await C.run(C.FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', x3]);
-    if (r.code !== 0) problems.push('concat failed: ' + r.err.trim()); else log(`x3: ${C.rel(x3)} (${(fs.statSync(x3).size / 1e6).toFixed(1)} MB)`);
+    fs.writeFileSync(list, Array(N).fill(`file '${out.replace(/'/g, "'\\''")}'`).join('\n') + '\n');
+    const xn = out.replace(/\.mp4$/, `-x${N}.mp4`);
+    const r = await C.run(C.FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', xn]);
+    if (r.code !== 0) problems.push('concat failed: ' + r.err.trim()); else log(`concat: ${N} copies -> ${C.rel(xn)} (${(fs.statSync(xn).size / 1e6).toFixed(1)} MB)`);
   }
   fs.writeFileSync(path.join(C.BUILD, 'render-log.txt'), logLines.join('\n') + '\n');
   if (problems.length) { log('PROBLEMS:'); for (const p of problems) log('  X ' + p); process.exit(1); }

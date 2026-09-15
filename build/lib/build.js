@@ -4,6 +4,9 @@
 //   -> <project>/build/manifest.json, sequence.txt, player.html (player.template.html with the manifest inlined).
 // Asset paths inside the manifest are relative to the project's build/ folder, where player.html lives.
 // Deterministic: no randomness is used (CONFIG.seed is reserved). Prints row counts, feature share and the acceptance checks.
+// The display and taste settings (resolution, fps, row heights, gutter, scroll speed, background, chapters) come from
+// <project>/handoff/show.json, which `python curate/run.py show` derives from config.toml; the values in CONFIG below are the
+// first run's and are what a build without show.json falls back to, with a warning.
 // Usage: bin/build [--speed N] [--quiet]
 
 const fs = require('fs');
@@ -40,6 +43,22 @@ const CONFIG = {
   frameFps: 30,            // render-mode frame sequences
   renderFps: 60,
 };
+// handoff/show.json replaces the first-run defaults above before the command line is read, so the flags still win.
+const SHOW = C.SHOW;
+if (SHOW) {
+  const num = (section, key) => {
+    const v = SHOW[section][key];
+    if (!(Number.isFinite(v) && v > 0)) throw new Error(`${C.rel(C.SHOW_JSON)}: ${section}.${key} is ${JSON.stringify(v)}, not a positive number; run python curate/run.py show`);
+    return v;
+  };
+  CONFIG.viewportW = num('output', 'width'); CONFIG.viewportH = num('output', 'height'); CONFIG.renderFps = num('output', 'fps');
+  CONFIG.scrollSpeed = num('taste', 'scroll_speed');
+  CONFIG.baseRowHeight = num('taste', 'base_row_height'); CONFIG.featureRowHeight = num('taste', 'feature_row_height');
+  CONFIG.gutter = num('taste', 'gutter');
+  if (!/^#[0-9A-Fa-f]{6}$/.test(String(SHOW.taste.background))) throw new Error(`${C.rel(C.SHOW_JSON)}: taste.background ${JSON.stringify(SHOW.taste.background)} is not #RRGGBB; run python curate/run.py show`);
+  CONFIG.background = SHOW.taste.background;
+  if (Number.isInteger(SHOW.taste.chapters) && SHOW.taste.chapters > 0) CONFIG.chapters = SHOW.taste.chapters;
+}
 // per-item playback overrides: <project>/overrides.json when it exists, else the repo's build/overrides.json (see overrides.example.json)
 const OVERRIDES_FILE = [C.PROJECT && path.join(C.PROJECT, 'overrides.json'), path.join(__dirname, '..', 'overrides.json')].filter(Boolean).find(p => fs.existsSync(p)) || path.join(__dirname, '..', 'overrides.json');
 const TEMPLATE = path.join(__dirname, '..', 'player.template.html');
@@ -65,12 +84,15 @@ const opt = { quiet: false };
 const say = s => console.log(s);
 const problems = [];
 const warnings = [];
+if (!SHOW) warnings.push('handoff/show.json missing; using the first run\'s defaults (2560x1440, 60 fps, medium tiles); run `python curate/run.py show`');
 
 // ---------------- items ----------------
 function loadItems() {
   const { rows } = C.readMediaCsv();
   const byName = new Map(rows.map(r => [r.filename, r]));
   const manifest = C.readPrepManifest() || { tiles: {}, clips: {} };
+  // prep capped the tiles at the max height show.json carried when it ran; a display change since then needs new tiles
+  if (SHOW && manifest.maxTileHeight != null && manifest.maxTileHeight !== SHOW.taste.max_tile_height) warnings.unshift(`tiles were prepared for max height ${manifest.maxTileHeight}, show.json says ${SHOW.taste.max_tile_height}; run bin/prep --force`);
   let overrides = {};
   try { overrides = JSON.parse(fs.readFileSync(OVERRIDES_FILE, 'utf8')).items || {}; } catch (_) { /* none */ }
   const items = [];
@@ -535,6 +557,7 @@ function main() {
   const itemIndex = new Map(items.map((it, i) => [it.id, i]));
   const manifest = {
     built: new Date().toISOString(), config: CONFIG,
+    show: SHOW,                                   // handoff/show.json as read, for the record (null when the build fell back)
     loop: { height: loopHeight, seconds: loopSeconds, frames, speed },
     items: items.map(it => ({
       id: it.id, stem: it.stem, kind: it.kind, w: it.w, h: it.h, src: it.src, duration: it.duration,
@@ -567,6 +590,7 @@ function main() {
     `slideshow sequence, built ${manifest.built}`,
     `${items.length} items: ${Object.entries(kinds).map(([k, v]) => `${v} ${k}`).join(', ')}`,
     `${rows.length} rows: ${feature} feature (${(100 * feature / rows.length).toFixed(0)}%), ${base} base; loop ${loopHeight} px = ${fmtTime(loopSeconds)} at ${speed.toFixed(3)} px/s (${frames} frames at ${CONFIG.renderFps} fps); max moving tiles in view ${maxInView}`,
+    outputLine(),
     `knobs: ${Object.entries(CONFIG).filter(([k]) => !['viewportW', 'viewportH', 'background', 'frameFps', 'renderFps'].includes(k)).map(([k, v]) => `${k}=${v}`).join(' ')}`,
     `spacing moves: ${log.length}${log.length ? '\n  ' + log.join('\n  ') : ''}`,
     '',
@@ -595,6 +619,7 @@ function main() {
 
   // ---- report
   say(`build: ${items.length} items (${Object.entries(kinds).map(([k, v]) => `${v} ${k}`).join(', ')}), ${rows.length} rows: ${feature} feature = ${(100 * feature / rows.length).toFixed(0)}%, ${base} base`);
+  say(`       ${outputLine()}`);
   say(`       loop ${loopHeight} px = ${fmtTime(loopSeconds)} at ${speed.toFixed(3)} px/s (${CONFIG.scrollSpeed} requested), ${frames} frames at ${CONFIG.renderFps} fps; max moving tiles in view ${maxInView} (cap ${CONFIG.movingCap})`);
   say(`       per chapter rows/feature/videoRows: ${perChapter.map(c => `${c.rows}/${c.feature}/${c.videos}`).join(' ')}`);
   const dist = kind => { const rs = rows.filter(r => r.type === kind); const hs = rs.map(r => r.h).sort((a, b) => a - b); const n = {}; rs.forEach(r => { n[r.items.length] = (n[r.items.length] || 0) + 1; }); return `${Object.entries(n).map(([k, v]) => `${v}x${k}`).join(' ')} items; h ${hs[0]}/${hs[hs.length >> 1]}/${hs[hs.length - 1]}`; };
@@ -615,4 +640,9 @@ function main() {
   say('       acceptance checks: all pass');
 }
 function fmtTime(s) { const m = Math.floor(s / 60); return `${m}m${String(Math.round(s - m * 60)).padStart(2, '0')}s`; }
+// the display and taste numbers this build ran with, and where they came from
+function outputLine() {
+  const from = SHOW ? `handoff/show.json, ${SHOW.taste.tile_size} tiles, max tile height ${SHOW.taste.max_tile_height}` : 'first-run defaults, no handoff/show.json';
+  return `output ${CONFIG.viewportW}x${CONFIG.viewportH} at ${CONFIG.renderFps} fps; rows ${CONFIG.baseRowHeight}/${CONFIG.featureRowHeight} px, gutter ${CONFIG.gutter}, scroll ${CONFIG.scrollSpeed} px/s, background ${CONFIG.background}, ${CONFIG.chapters} chapters (${from})`;
+}
 main();

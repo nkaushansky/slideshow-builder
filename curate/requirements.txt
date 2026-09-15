@@ -2,8 +2,9 @@
 # Install with `python curate/setup.py`, or by hand: python -m venv .venv && .venv/Scripts/pip install -r curate/requirements.txt
 Pillow==12.3.0
 pillow-heif==1.7.0
-numpy==2.5.3
+numpy==2.4.6
 ImageHash==4.3.2
 opencv-python-headless==5.0.0.93
 onnxruntime==1.29.0
 tzdata==2026.3
+tzlocal==5.3.1

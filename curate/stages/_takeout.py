@@ -16,10 +16,14 @@ import collections
 import json
 import os
 import re
+import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
-MEDIA_EXT = {".heic", ".heif", ".mp4", ".mov", ".m4v", ".jpg", ".jpeg", ".png", ".gif", ".webp"}
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common import GIF_EXT, STILL_EXT, VIDEO_EXT  # noqa: E402
+
+MEDIA_EXT = STILL_EXT | VIDEO_EXT | GIF_EXT
 SIDECAR_MAX_BYTES = 64_000
 SIDECAR_COLUMNS = ["zip", "member", "title", "folder", "photo_taken_ts", "creation_ts", "lat", "lon",
                    "people", "description", "title_collision", "media_member"]

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 // bin/prep — derive display assets from handoff/media into the project's build/. Never touches media/.
-//   build/tiles/<stem>.jpg      plain stills (Live Photo stills are never shown), JPEG q90, display height <= 1640
-//   build/clips/<stem>.mp4      Live Photo .MP4 halves, standalone videos, GIFs -> H.264 muted, display height <= 1640
+//   build/tiles/<stem>.jpg      plain stills (Live Photo stills are never shown), JPEG q90, display height <= show.json taste.max_tile_height (1640 without show.json)
+//   build/clips/<stem>.mp4      Live Photo .MP4 halves, standalone videos, GIFs -> H.264 muted, display height <= show.json taste.max_tile_height (1640 without show.json)
 //   build/prep-manifest.json    per-file facts that build/render rely on (clip durations, slow-motion, HDR, dims)
 //   build/prep-report.txt       verification report; build/prep.log has the per-file lines
 // Idempotent: existing outputs are skipped unless --force. Outputs are written to a temp name and renamed.
@@ -281,6 +281,7 @@ async function main() {
   });
   note(`verified tiles ok ${tileOk}, bad ${tileBad}, missing ${tileMissing}; clips ok ${clipOk}, bad ${clipBad}, missing ${clipMissing}`);
   say(`  tiles ok ${tileOk} / bad ${tileBad} / missing ${tileMissing}; clips ok ${clipOk} / bad ${clipBad} / missing ${clipMissing}`);
+  if ((tileBad || clipBad) && !opt.force) say('  ! existing outputs are kept as they are without --force; run bin/prep --force to remake the bad ones');
   fs.writeFileSync(C.PREP_MANIFEST, JSON.stringify(manifest, null, 1));
   for (const f of failures) note('FAILED ' + f);
   finish(t0, manifest);

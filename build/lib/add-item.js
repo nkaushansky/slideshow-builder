@@ -17,6 +17,8 @@
 //   An input that already carries a YYYY-MM-DD_ prefix (a cut-list file) gets the given date in place of it, not on top.
 //   An input that is a cut-list file is promoted: its cut-list.csv row is dropped and its original_source_path carried
 //   over, so media.csv + cut-list.csv keep accounting for every file exactly once.
+//   A file on the owner's off-limits list ([show] off_limits in config.toml, resolved into handoff/show.json by
+//   `python curate/run.py show`) is refused by media_id or by name, before anything is written; the dry run says the same.
 
 const fs = require('fs');
 const os = require('os');
@@ -149,6 +151,18 @@ async function inspectVideo(inp) {
 
   // ---- probe
   for (const inp of inputs) { inp.info = inp.cls === 'still' ? await inspectStill(inp) : await inspectVideo(inp); inp.mediaId = await C.sha256File(inp.src); }
+
+  // ---- off-limits: the owner's no-go list, by media_id (the bytes) or by name (the name given, its bare form, its new name)
+  if (inputs.length) {
+    if (!C.SHOW) console.log('add-item: no handoff/show.json, so the off-limits list was not checked (python curate/run.py show writes it)');
+    else {
+      const ol = C.SHOW.off_limits || {};
+      const ids = new Set(ol.media_ids || []), names = new Set((ol.filenames || []).map(n => String(n).toLowerCase()));
+      for (const inp of inputs) {
+        if (ids.has(inp.mediaId) || [inp.origBase, inp.base, inp.newName].some(n => names.has(n.toLowerCase()))) die(`${inp.origBase} is on the off-limits list ([show] off_limits in config.toml); not added`);
+      }
+    }
+  }
   C.ensureMediaIdColumn(header);
   C.ensureMediaIdColumn(cut.header);
   if (opt.featured && !inputs.some(i => i.cls === 'still')) die('--featured needs a still (features.txt lists stills)');

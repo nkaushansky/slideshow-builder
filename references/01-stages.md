@@ -5,15 +5,18 @@ Each stage is a command over one project folder. Each is idempotent and resumabl
 Commands, as implemented in this repository (Windows, macOS and Linux; run from anywhere with `--project <folder>`, or from inside the project folder):
 
 ```
-python curate/setup.py --project <folder>          Step 0: environment, dependencies, models, tool report
+python curate/setup.py --project <folder> --apply  Step 0: environment, dependencies, models, tool report; writes the
+                                                   detected timezone and display resolution into config.toml
 python curate/run.py ingest    [--dry-run]
 python curate/run.py index     [--dry-run]
 python curate/run.py validate  [--list | --resolve <media_id> <gate> --by "<witness>"]
 python curate/run.py identify
 python curate/run.py select    [--lens v1|v2|v3|v4] [--dry-run]
-python curate/run.py sheets    [--with-drops] [--featured] [--alternates <year>] [--replacements <flags.txt>]
+python curate/run.py sheets    [--with-drops] [--featured] [--alternates <year>] [--replacements <flags.txt>] [--pdf]
 python curate/run.py handoff   [--dry-run]
-build/bin/prep  build/bin/build  build/bin/live  build/bin/apply-replacements <round>  build/bin/render  (.cmd on Windows)
+python curate/run.py show      [--dry-run]        handoff/show.json from config.toml, alone, after a config change
+build/bin/prep  build/bin/build  build/bin/live  build/bin/apply-replacements <round>  (.cmd on Windows)
+build/bin/render [--seconds N] [--from <seconds>] [--labels] [--concat]
 ```
 
 Project folder layout:
@@ -24,13 +27,13 @@ project/
   sources/          the export as received (read-only; may be a symlink or a path in config)
   work/             flat working copy, one file per source file, plus quarantine subfolders
   index/            items.csv, flags.csv, people.csv, selection.csv, sheets/
-  handoff/          media/  media.csv  features.txt  cut-list.csv  inventory.md  HANDOFF.md  changes.log
+  handoff/          media/  media.csv  features.txt  cut-list.csv  inventory.md  HANDOFF.md  changes.log  show.json
   build/            tiles/ clips/ frames/ player.html sequence.txt manifest.json logs/ render output
 ```
 
 ## Step 0: environment check
 
-Before ingest. Detect and report: OS and version, chip, memory, free disk; Python, Node, ffmpeg, ffprobe, Chrome, VLC with versions and paths; Playwright's ability to launch a browser (bundled Chromium, else installed Chrome via `channel: 'chrome'`); whether the working folder is on a synced drive. Pin versions in the brief. Known-good on the first run: Python 3.11+, Node 24 LTS, ffmpeg 7 or newer static build, Playwright 1.6x driving installed Chrome, VLC 3.x. Older macOS releases may refuse Homebrew and Playwright's own Chromium; the fallbacks are a static ffmpeg build, the official Node tarball, and Chrome via channel. Two web searches to confirm current versions for the detected OS are worth it; the first run skipped them and paid with a day.
+Before ingest. `python curate/setup.py --project <folder> --apply` detects and reports: OS and version, chip, memory, free disk; Python, Node, ffmpeg, ffprobe, Chrome, VLC with versions and paths; the Playwright package in `build/` (version) and the browser the render will try first (`[tools] chrome` when set and present, else Playwright's bundled Chromium, else installed Chrome via `channel: 'chrome'`, resolved at render time, not launched at Step 0); whether the working folder is on a synced drive; the machine's timezone (tzlocal, then `TZ`, `/etc/localtime`, `/etc/timezone`) and the logical resolution of its display (`GetSystemMetrics` on Windows, `system_profiler` on macOS, `xrandr` on Linux). With `--apply` the detected timezone, display resolution and build OS are written into `config.toml` where the intake left them blank (`[project] timezone` when missing, blank or `UTC`; `[output] resolution`; `[machines] build_os`); an answer already in the config stands, and without `--apply` the lines to paste are printed. Ask for what it could not detect; the display machine's resolution is the intake's answer whenever it is not the build machine. The report also lands in `project/environment.md`. Pin versions in the brief. Known-good on the first run: Python 3.11+, Node 24 LTS, ffmpeg 7 or newer static build, Playwright 1.6x driving installed Chrome, VLC 3.x. Older macOS releases may refuse Homebrew and Playwright's own Chromium; the fallbacks are a static ffmpeg build, the official Node tarball, and Chrome via channel. Two web searches to confirm current versions for the detected OS are worth it; the first run skipped them and paid with a day.
 
 Also measure two things that shape the render: the cost of a browser screenshot at the output resolution (if it is hundreds of milliseconds, the canvas pipeline in `06-layout-motion-render.md` is required, not optional) and the machine's idle-sleep setting (a one-minute idle sleep killed a preparation run on the first run; wrap long runs in the OS's keep-awake tool).
 
@@ -38,6 +41,7 @@ Also measure two things that shape the render: the cost of a browser screenshot 
 
 Input: the sources. Output: `work/` flat, `index/ingest.csv` with one row per file.
 - Copy, never move. Sources stay untouched for the life of the project.
+- Accepted file types: stills `.jpg .jpeg .heic .heif .png .webp`; videos `.mov .mp4 .m4v .avi .mkv .mts .m2ts .3gp .webm .wmv .mpg .mpeg`; animated `.gif`. Anything else is cut with reason `unsupported` at select, so it stays in the accounting instead of reaching the build.
 - Flatten into one folder. On basename collision, prefix with the source path chain, never a sequence number, so origin stays readable.
 - For Takeout: index the JSON sidecars **inside the zips** first, before extracting anything. Thousands of sidecars index in seconds. Extract only what later stages need.
 - Hash every file (SHA-256) and assign a stable `media_id` from the hash. IDs survive renames; filenames do not.
@@ -74,26 +78,31 @@ Input: `items.csv`, seed photos, export people tags. Output: `index/people.csv`:
 
 Input: `items.csv`, `people.csv`, `flags.csv`, `config.toml`. Output: `index/selection.csv` (selected, lens ranks, featured, pins, tradition tags), `index/cut-list.csv` with one-word reasons.
 - Build the candidate pool from the scope or theme: date range, people, places, albums, tags.
-- Apply the cap: moments per period, pro-rated for partial periods; a Live Photo pair costs one slot; candidates must pass the people or family gate; no pick within perceptual distance 26 of an already seated pick; a bucket with no dissimilar candidate is left short rather than forced.
-- Run the four lenses and the consensus pass from `04-selection-lenses.md`. Seat owner pins first, then tradition anchors, then one motion item per month, then the rest.
+- The owner's off-limits list (`[show] off_limits`: filenames, media ids, or a file or folder path) is applied before any other test; a match is cut with reason `off-limits`, and a Live Photo pair goes together.
+- Apply the cap: moments per period, pro-rated for partial periods; a Live Photo pair costs one slot; candidates must pass the people gate (`[family] gate`: `none` skips the check, `people` wants any person in frame, `family` wants one of the named people); no pick within perceptual distance 26 of an already seated pick; a bucket with no dissimilar candidate is left short rather than forced. The stage prints which gate ran.
+- Run the four lenses and the consensus pass from `04-selection-lenses.md`. Seat owner pins first (`[pins] files` and `[show] must_include`, matched by media id, by the dated filename or by the original name; a miss is a warning), then tradition anchors, then one motion item per month, then the rest.
 - Choose featured picks: about one in six of the stills, criteria in the lenses reference.
-- Reasons for every cut: over-cap, no-people (or no-family), undated, superseded, burst, duplicate, flagged.
+- Reasons for every cut: off-limits, over-cap, no-people (or no-family), undated, superseded, burst, duplicate, flagged. Print the count per reason, the off-limits count and the number of pins seated.
 
 ## 6. review (owner checkpoint 1)
 
-Numbered contact sheets of the proposed cut, one per period, drops grayed below a line, candidates numbered; the owner approves or edits by number. Alternates per period on request. Details in `05-review-loop.md`. Target: about 15 sheets for a whole-life show, an hour of the owner's time.
+Numbered contact sheets of the proposed cut, one per period, drops grayed below a line, candidates numbered; the owner approves or edits by number. Alternates per period on request. `--pdf` bundles every sheet into `index/sheets/contact-sheets.pdf`, one page per sheet (years ascending, then featured, alternates, replacements), for an owner who is not at the machine; `--pdf` alone re-bundles the sheets already on disk. Details in `05-review-loop.md`. Target: about 15 sheets for a whole-life show, an hour of the owner's time.
 
 ## 7. handoff
 
-Freeze the set as the contract in `02-index-contract.md`: `handoff/media/` with byte-identical copies, `media.csv`, `features.txt`, `cut-list.csv`, `inventory.md`, `HANDOFF.md`, and an empty `changes.log`. Verify: file count and byte total; every companion exists; every featured line is a still; kept rows plus cut rows equal files accounted for, every file exactly once. Print the invariant. `HANDOFF.md` must not contain any mechanism that was not demonstrated; uncertainties are listed as uncertainties.
+Freeze the set as the contract in `02-index-contract.md`: `handoff/media/` with byte-identical copies, `media.csv`, `features.txt`, `cut-list.csv`, `inventory.md`, `HANDOFF.md`, an empty `changes.log`, and `show.json`. Verify: file count and byte total; every companion exists; every featured line is a still; kept rows plus cut rows equal files accounted for, every file exactly once. Print the invariant. `HANDOFF.md` must not contain any mechanism that was not demonstrated; uncertainties are listed as uncertainties.
+
+### `show`, the settings file
+
+`python curate/run.py show` writes `handoff/show.json` on its own: the display and taste settings the build reads (resolution, frame rate, row heights, gutter, scroll speed, background, concat copies, quality preset) derived from `[output]` and `[taste]` in `config.toml`, plus `[show] off_limits` resolved to media ids and filenames so the apply tool can refuse them. Every number is derived in Python; the JavaScript side only reads them. The handoff stage writes the same file, so run `show` alone after a config change to update the build side without a new handoff. It prints the derived numbers; `--dry-run` prints them and writes nothing; a bad value exits with the key name and what it accepts. The rules are in `02-index-contract.md`.
 
 ## 8. build (owner checkpoint 2)
 
-Prepare tiles and clips, generate the sequence and rows, open the live player, run one review round, apply flags through the ledger. Algorithms and knobs in `06-layout-motion-render.md`; the review loop in `05-review-loop.md`. On the first run, preparation of about 470 items took about an hour of machine time (tiles, H.264 clips with HDR tone-mapping, slow-motion handling), and a swap applied through the ledger took seconds.
+Prepare tiles and clips, generate the sequence and rows, open the live player, run one review round, apply flags through the ledger. The viewport, frame rate, row heights, gutter, scroll speed and background come from `handoff/show.json`; without it the build uses the first run's defaults (2560×1440, 60 fps, medium tiles) and says so in one warning. `bin/build` reports which it used. Algorithms and knobs in `06-layout-motion-render.md`; the review loop in `05-review-loop.md`. On the first run, preparation of about 470 items took about an hour of machine time (tiles, H.264 clips with HDR tone-mapping, slow-motion handling), and a swap applied through the ledger took seconds.
 
 ## 9. render (owner checkpoint 3)
 
-Test render of 60 seconds; window renders around every special case; full render of exactly one loop with the wrap proved identical; concatenate three copies so the player's own seam lands rarely; soak in the playback app; the launcher; a backup copy; the owner's full watch. Then the runbook. Benchmarks: a 15-minute loop at 2560×1440, 60 fps took about 100 minutes on 2017-era hardware; the soak was two hours.
+Test render of 60 seconds (`--seconds 60`; add `--labels` when the owner is not at the machine, so every tile carries its filename and date and every row its number and chapter, written to a `-labels` file the launchers never pick up); window renders around every special case; full render of exactly one loop with the wrap proved identical; `--concat` writes `slideshow-x<N>.mp4`, N copies back to back (`[output] concat_copies`, default 3), so the player's own seam lands rarely; soak in the playback app; the launcher; a backup copy; the owner's full watch. Size, frame rate and the x264 preset come from `show.json` (`[output] resolution`, `fps`, `quality`). Then the runbook. Benchmarks: a 15-minute loop at 2560×1440, 60 fps took about 100 minutes on 2017-era hardware; the soak was two hours.
 
 ## The ledger, across all stages
 

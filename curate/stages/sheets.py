@@ -2,7 +2,7 @@
 
     python curate/run.py sheets [--project P] [--dry-run] [--force] [--with-drops]
                                 [--featured] [--alternates YEAR ...] [--replacements FILE]
-                                [--thumb 400] [--cols 5]
+                                [--thumb 400] [--cols 5] [--pdf]
 
 Default: one sheet per year of the proposed cut, thumbnails numbered so the owner can answer by
 number ("drop 7", "swap 12 for D3"). Drops for the year (cut as over-cap) are grayed below a
@@ -11,6 +11,10 @@ line only with --with-drops, so a whole-life show stays at about fifteen sheets.
 candidates for that year. --replacements FILE reads the live player's flags list (one filename
 per line, an optional note after it) and writes one sheet per flagged file with up to ten
 candidates from the cut list, plus index/sheets/replacements-pools.json.
+--pdf bundles every sheet in index/sheets/ into contact-sheets.pdf, one page per sheet (years
+ascending, then featured, alternates, replacements), for an owner who is not at the machine. It
+runs after whatever else the command wrote; --pdf alone re-bundles the sheets on disk, since the
+default year pass skips sheets that are unchanged.
 
 Every sheet gets lines in index/sheets/index.md mapping numbers to filenames and media_ids.
 Spec: references/05-review-loop.md. Age-and-era outlier highlighting (gate 8) is not in 0.1;
@@ -26,6 +30,7 @@ import json
 import os
 import shutil
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import project, say, write_atomic  # noqa: E402
@@ -69,10 +74,12 @@ class SheetWriter:
                 self.state = {}
         self.written = self.skipped = 0
         self.placeholders = 0
+        self.names: list[str] = []  # every sheet this run wrote, would write or skipped, for --pdf
 
     def write(self, name: str, title: str, subtitle: str, entries: list[dict], drops: list[dict] | None = None,
               index_lines: list[str] | None = None) -> None:
         """entries/drops: dicts with num, item, text1, text2, color, gray. Skips when unchanged."""
+        self.names.append(name)
         key = hashlib.sha256(json.dumps([[e["num"], e["item"]["media_id"], e["text1"]] for e in (entries + (drops or []))]
                                         + [title, subtitle, self.TH, self.COLS]).encode()).hexdigest()
         out = self.P.sheets / f"{name}.jpg"
@@ -153,13 +160,62 @@ class SheetWriter:
         live = {k: v for k, v in self.state.items() if (self.P.sheets / f"{k}.jpg").is_file()}
         self.state = live
         write_atomic(self.state_path, json.dumps(live, indent=0))
-        lines = ["# Contact sheets", "", f"Generated {dt.date.today().isoformat()}. Answer by sheet and number.", ""]
+        lines = ["# Contact sheets", "", f"Generated {dt.date.today().isoformat()}; people gate `{self.P.people_gate}`. Answer by sheet and number.", ""]
         for k in sorted(live):
             lines.append(f"## {k}.jpg")
             lines.append("")
             lines.extend(live[k].get("lines", []))
             lines.append("")
         write_atomic(self.P.sheets / "index.md", "\n".join(lines) + "\n")
+
+
+def _sheet_rank(stem: str) -> tuple[int, str]:
+    """Page order of the PDF: year sheets ascending, featured, alternates, replacements, then the rest by name."""
+    if len(stem) == 4 and stem.isascii() and stem.isdigit():
+        return (0, stem)
+    if stem == "featured":
+        return (1, stem)
+    if stem.startswith("alternates-"):
+        return (2, stem)
+    if stem.startswith("replace-"):
+        return (3, stem)
+    return (4, stem)
+
+
+def bundle_pdf(folder, dry: bool = False, planned: list[str] | None = None) -> int:
+    """Bundle every sheet (*.jpg) in folder into folder/contact-sheets.pdf, one page per sheet; returns the page count.
+
+    dry: print what would be written and write nothing. planned: the sheet names a dry run would have written,
+    so the count matches what a real run leaves on disk. The writer's own half-written *.tmp.jpg is never a page.
+    """
+    folder = Path(folder)
+    stems = set()
+    if folder.is_dir():
+        stems = {p.stem for p in folder.glob("*.jpg") if not p.name.endswith(".tmp.jpg")}
+    if dry:
+        stems |= set(planned or [])
+    order = sorted(stems, key=_sheet_rank)
+    out = folder / "contact-sheets.pdf"
+    if not order:
+        say(f"  ! no sheets in {folder}; {out.name} not written")
+        return 0
+    if dry:
+        say(f"  would write {out.name} ({len(order)} pages)")
+        return len(order)
+    from PIL import Image
+    pages = []
+    try:
+        for stem in order:
+            with Image.open(folder / f"{stem}.jpg") as im:
+                pages.append(im.convert("RGB"))  # a loaded copy, so the file closes here
+        tmp = out.with_name(out.name + ".tmp")  # format given explicitly: the temp name has no .pdf suffix
+        pages[0].save(tmp, "PDF", save_all=True, append_images=pages[1:], resolution=100.0, quality=86)
+        os.replace(tmp, out)
+    finally:
+        for im in pages:
+            im.close()
+    say(f"  wrote {out.name} ({len(order)} pages): {out}")
+    return len(order)
 
 
 def _presence(pp: dict | None) -> str:
@@ -214,6 +270,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--thumb", type=int, default=400)
     ap.add_argument("--cols", type=int, default=5)
     ap.add_argument("--alternates-count", type=int, default=12)
+    ap.add_argument("--pdf", action="store_true", help="bundle every sheet in the folder into contact-sheets.pdf, one page per sheet")
     a = ap.parse_args(argv)
     P = project()
 
@@ -275,7 +332,7 @@ def main(argv: list[str]) -> int:
             fl = flags_by_year.get(y)
             fl_txt = ("flags: " + ", ".join(f"{k} {v}" for k, v in sorted(fl.items()))) if fl else "no open flags"
             title = f"{y}   {P.honoree} {P.age_label(y)}".rstrip()
-            sub = (f"{len(ids)} of cap {caps.get(y, 0)}  |  people detected in {seen} of {len(ids)}  |  {fl_txt}  |  "
+            sub = (f"gate {P.people_gate}  |  {len(ids)} of cap {caps.get(y, 0)}  |  people detected in {seen} of {len(ids)}  |  {fl_txt}  |  "
                    f"*F* featured, LP Live Photo, (mo)/(yr) month- or year-precision date")
             W.write(f"{y}", title, sub, entries, drops, lines)
 
@@ -319,9 +376,10 @@ def main(argv: list[str]) -> int:
             say(f"  wrote replacements-pools.json ({len(pools)} pools)")
 
     W.finish()
+    pdf_pages = bundle_pdf(P.sheets, a.dry_run, W.names) if a.pdf else None
     say(f"sheets: {W.written} {'would be written (dry run)' if a.dry_run else 'written'}, {W.skipped} unchanged, "
         f"{W.placeholders} placeholder tile(s); folder {P.sheets}")
-    return 0
+    return 2 if pdf_pages == 0 else 0
 
 
 def _replacement_pools(P, path: str, selection, items, people, scores, say) -> dict:

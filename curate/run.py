@@ -25,6 +25,7 @@ STAGES = {
     "select": "the four lenses, consensus, featured picks -> index/selection.csv, index/cut-list.csv",
     "sheets": "numbered contact sheets of the proposed cut, replacement pools -> index/sheets/",
     "handoff": "freeze the set as the index contract -> handoff/",
+    "show": "write handoff/show.json from config.toml (display, taste and off-limits settings for the build side)",
 }
 
 

@@ -70,6 +70,21 @@ const FEATURES_TXT = path.join(HANDOFF, 'features.txt');
 const CUT_LIST_CSV = path.join(HANDOFF, 'cut-list.csv');
 const PREP_MANIFEST = path.join(BUILD, 'prep-manifest.json');
 
+// ---------- show.json: the display and taste settings derived from config.toml (references/02) ----------
+// Written by `python curate/run.py show` (and by the handoff stage). Every number the build side needs comes from here;
+// the JavaScript never reads config.toml for them. Missing = null, and each script says what it falls back to. A file
+// that is there but unreadable is an error, not a silent default.
+const SHOW_JSON = path.join(HANDOFF, 'show.json');
+function readShow() {
+  if (!fs.existsSync(SHOW_JSON)) return null;
+  let show;
+  try { show = JSON.parse(fs.readFileSync(SHOW_JSON, 'utf8')); }
+  catch (e) { throw new Error(`${SHOW_JSON} is not valid JSON (${e.message}); run python curate/run.py show`); }
+  if (!show || typeof show !== 'object' || !show.output || !show.taste) throw new Error(`${SHOW_JSON} lacks its output/taste sections; run python curate/run.py show`);
+  return show;
+}
+const SHOW = readShow();
+
 // ffmpeg/ffprobe: [tools] in config.toml, else the repo's tools/ffmpeg/, else PATH.
 function toolBin(name) {
   if (cfgTools[name]) return path.resolve(PROJECT || ROOT, cfgTools[name]);
@@ -78,6 +93,8 @@ function toolBin(name) {
 }
 const FFMPEG = toolBin('ffmpeg');
 const FFPROBE = toolBin('ffprobe');
+// [tools] chrome: a browser the owner chose for render/simsched (blank = Playwright's bundle, then installed Chrome; see launchBrowser)
+const CHROME = cfgTools.chrome ? path.resolve(PROJECT || ROOT, cfgTools.chrome) : '';
 // HEIC and resizing: sips on macOS is the fast path; everywhere else curate/heic.py (pillow-heif) does the same job.
 const SIPS = IS_MAC && fs.existsSync('/usr/bin/sips') ? '/usr/bin/sips' : null;
 const HEIC_PY = path.join(ROOT, 'curate', 'heic.py');
@@ -90,11 +107,16 @@ function pythonBin() {
 function rel(p) { return path.relative(PROJECT || process.cwd(), p) || '.'; }
 function webRel(from, p) { return path.relative(from, p).split(path.sep).join('/'); }
 
-const STILL_EXT = new Set(['.jpg', '.jpeg', '.heic', '.heif', '.png']);
-const VIDEO_EXT = new Set(['.mov', '.mp4', '.m4v']);
+// the same three sets as curate/common.py; the two sides must agree on what counts as a still, a video and a gif
+const STILL_EXT = new Set(['.jpg', '.jpeg', '.heic', '.heif', '.png', '.webp']);
+const VIDEO_EXT = new Set(['.mov', '.mp4', '.m4v', '.avi', '.mkv', '.mts', '.m2ts', '.3gp', '.webm', '.wmv', '.mpg', '.mpeg']);
 const GIF_EXT = new Set(['.gif']);
-const MAX_TILE_H = 1640;   // 2x the feature row; keeps a 5K render possible later
-const MAX_CLIP_H = 1640;   // live-mode clips, same cap
+const SIPS_EXT = new Set(['.jpg', '.jpeg', '.heic', '.heif', '.png']);   // what sips is trusted with; every other still (webp) goes through heic.py
+// Tiles and live-mode clips are capped at 2x the feature row height: show.json taste.max_tile_height, which the Python side
+// derives from the display (references/02). 1640 is the first run's value (2560x1440, medium tiles), used only without show.json.
+const MAX_TILE_H = SHOW ? SHOW.taste.max_tile_height : 1640;
+if (!(Number.isInteger(MAX_TILE_H) && MAX_TILE_H > 0)) throw new Error(`${SHOW_JSON}: taste.max_tile_height is missing or not a positive integer; run python curate/run.py show`);
+const MAX_CLIP_H = MAX_TILE_H;
 const SLOWMO_MIN_FPS = 100; // >= this average fps is a slow-motion capture; played at 30 fps
 const FRAMES_PAD_MAX = 30;  // bin/frames: more than this many missing frames at the end of a sequence is a failure, not padding
 const IGNORED_FILES = new Set(['Thumbs.db', '.DS_Store', 'desktop.ini']);
@@ -111,6 +133,7 @@ function extClass(filename) {
   return null;
 }
 function isHeicLike(filename) { const e = path.extname(filename).toLowerCase(); return e === '.heic' || e === '.heif' || e === '.png'; }
+function sipsCan(file) { return !!SIPS && SIPS_EXT.has(path.extname(file).toLowerCase()); }
 function tilePath(filename) { return path.join(TILES, stemOf(filename) + '.jpg'); }
 function clipPath(filename) { return path.join(CLIPS, stemOf(filename) + '.mp4'); }
 
@@ -252,7 +275,8 @@ async function heicPy(args) {
   return r;
 }
 // Facts about any still: displayed width/height (after EXIF orientation), stored dimensions, orientation, DateTimeOriginal.
-// JPEG: pure JS. Anything else: sips (macOS fast path) or curate/heic.py. The three agree on every field.
+// JPEG: pure JS. HEIC/HEIF/PNG: sips (macOS fast path) or curate/heic.py. Anything else (webp): curate/heic.py, everywhere.
+// The three agree on every field.
 async function imageInfo(file) {
   if (/\.jpe?g$/i.test(file)) {
     const info = jpegInfo(fs.readFileSync(file));
@@ -261,7 +285,7 @@ async function imageInfo(file) {
       return { width: d.width, height: d.height, storedWidth: info.width, storedHeight: info.height, orientation: info.orientation || 1, dateTimeOriginal: exifDateToCsv(info.dateTimeOriginal), tool: 'jpeg' };
     }
   }
-  if (SIPS) {
+  if (sipsCan(file)) {
     const stored = await sipsDims(file);
     let orientation = 1, dto = '';
     // sips keeps the EXIF block (orientation, dates) when converting; a tiny JPEG is enough to read it.
@@ -280,8 +304,9 @@ async function imageInfo(file) {
 }
 // A JPEG from any still, display height capped at maxHeight (0 = keep size). sips leaves the pixels stored-rotated and
 // keeps the orientation tag; heic.py writes them upright with the tag cleared. Both verify through jpegInfo + displayedDims.
+// sips only for JPEG/HEIC/HEIF/PNG; a webp goes through heic.py on every platform.
 async function makeJpeg(src, out, { maxHeight = 0, quality = 90, storedRotated = false } = {}) {
-  if (SIPS) {
+  if (sipsCan(src)) {
     const a = ['-s', 'format', 'jpeg', '-s', 'formatOptions', String(quality)];
     // sips resamples the STORED image: for a stored-rotated file the displayed height is the stored width.
     if (maxHeight) a.push(storedRotated ? '--resampleWidth' : '--resampleHeight', String(maxHeight));
@@ -314,15 +339,21 @@ async function ensureMediaIds(header, rows, resolveFile) {
   return n;
 }
 // ---------- browser ----------
-// Playwright's bundled Chromium first; installed Google Chrome (channel) when the bundle is missing or will not start.
+// In order: [tools] chrome from config.toml (when set and the file exists), Playwright's bundled Chromium, installed Google
+// Chrome through Playwright's channel. Logs which one started, and every attempt that failed before it.
 async function launchBrowser(log = console.log) {
   const { chromium } = require('playwright');
-  try { const b = await chromium.launch({ headless: true }); log('browser: Playwright Chromium'); return b; }
-  catch (e) {
-    const first = String(e.message || e).split('\n')[0];
-    try { const b = await chromium.launch({ channel: 'chrome', headless: true }); log(`browser: Google Chrome via channel (bundled Chromium unavailable: ${first})`); return b; }
-    catch (e2) { throw new Error(`no browser could start. Playwright Chromium: ${first}. Chrome channel: ${String(e2.message || e2).split('\n')[0]}. Run "npx playwright install chromium" in build/ or install Google Chrome.`); }
+  const attempts = [], failed = [];
+  if (CHROME) {
+    if (fs.existsSync(CHROME)) attempts.push({ name: `[tools] chrome ${CHROME}`, opts: { executablePath: CHROME } });
+    else failed.push(`[tools] chrome ${CHROME}: no such file`);
   }
+  attempts.push({ name: 'Playwright Chromium', opts: {} }, { name: 'Google Chrome via channel', opts: { channel: 'chrome' } });
+  for (const a of attempts) {
+    try { const b = await chromium.launch({ headless: true, ...a.opts }); log(`browser: ${a.name}${failed.length ? ` (tried first: ${failed.join('; ')})` : ''}`); return b; }
+    catch (e) { failed.push(`${a.name}: ${String(e.message || e).split('\n')[0]}`); }
+  }
+  throw new Error(`no browser could start. ${failed.join('. ')}. Set [tools] chrome in config.toml, run "npx playwright install chromium" in build/, or install Google Chrome.`);
 }
 // JPEG header facts: stored dims, EXIF Orientation, EXIF DateTimeOriginal. Pure JS, no subprocess.
 function jpegInfo(buf) {
@@ -411,9 +442,10 @@ function readPrepManifest() {
 module.exports = {
   FRAMES_PAD_MAX,
   ROOT, PROJECT, HANDOFF, MEDIA, BUILD, TOOLS, TILES, CLIPS, FRAMES, MEDIA_CSV, FEATURES_TXT, CUT_LIST_CSV, PREP_MANIFEST,
-  FFMPEG, FFPROBE, SIPS, HEIC_PY, IS_WIN, IS_MAC, STILL_EXT, VIDEO_EXT, GIF_EXT, MAX_TILE_H, MAX_CLIP_H, SLOWMO_MIN_FPS, IGNORED_FILES,
+  SHOW_JSON, SHOW, readShow,
+  FFMPEG, FFPROBE, SIPS, HEIC_PY, CHROME, IS_WIN, IS_MAC, STILL_EXT, VIDEO_EXT, GIF_EXT, MAX_TILE_H, MAX_CLIP_H, SLOWMO_MIN_FPS, IGNORED_FILES,
   CLIP_TYPES, MOVING_TYPES,
-  stemOf, extClass, isHeicLike, tilePath, clipPath, rel, webRel, pythonBin,
+  stemOf, extClass, isHeicLike, sipsCan, tilePath, clipPath, rel, webRel, pythonBin,
   parseCsv, serializeCsv, readCsvObjects, writeCsvObjects, readMediaCsv, readFeatures, writeFeatures, atomicWrite,
   dateKey, run, pool, ffprobeJson, probeVideo, sipsDims, imageInfo, makeJpeg, jpegInfo, exifDateToCsv, displayedDims,
   sha256File, ensureMediaIdColumn, ensureMediaIds, launchBrowser,
@@ -423,7 +455,7 @@ module.exports = {
 // `node lib/common.js --print build` prints one resolved path (the shell wrappers use it); --paths prints them all as JSON.
 if (require.main === module) {
   const a = process.argv.slice(2);
-  const all = { root: ROOT, project: PROJECT, handoff: HANDOFF, media: MEDIA, build: BUILD, tiles: TILES, clips: CLIPS, frames: FRAMES, ffmpeg: FFMPEG, ffprobe: FFPROBE, python: pythonBin(), sips: SIPS };
+  const all = { root: ROOT, project: PROJECT, handoff: HANDOFF, media: MEDIA, build: BUILD, tiles: TILES, clips: CLIPS, frames: FRAMES, show: SHOW_JSON, ffmpeg: FFMPEG, ffprobe: FFPROBE, chrome: CHROME, python: pythonBin(), sips: SIPS };
   const i = a.indexOf('--print');
   if (i >= 0) { const v = all[a[i + 1]]; if (v == null) { console.error('unknown path ' + a[i + 1] + '; one of ' + Object.keys(all).join(', ')); process.exit(2); } console.log(v); }
   else console.log(JSON.stringify(all, null, 1));

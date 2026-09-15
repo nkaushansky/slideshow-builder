@@ -1,11 +1,16 @@
 """setup: create the environment, install the pinned dependencies, fetch the models, report versions.
 
-    python curate/setup.py [--project <folder>] [--venv <path>] [--skip-models] [--fetch-ffmpeg] [--no-install]
+    python curate/setup.py [--project <folder>] [--apply] [--venv <path>] [--skip-models] [--fetch-ffmpeg] [--no-install]
 
 Plain script, no setuptools. What it does, in order:
 
 1. Creates a virtual environment at <repo>/.venv (or --venv) if there is none, and installs
-   curate/requirements.txt into it with pip.
+   curate/requirements.txt into it with pip. Then detects what Step 0 of the intake would
+   otherwise ask: the machine's IANA timezone (tzlocal in the venv, else TZ, /etc/localtime,
+   /etc/timezone) and the logical resolution of its screen (GetSystemMetrics on Windows,
+   system_profiler on macOS, xrandr on Linux). With --project --apply the detected values are
+   written into config.toml where it is blank ([project] timezone when missing, blank or "UTC";
+   [output] resolution; [machines] build_os); without --apply the lines to paste are printed.
 2. Fetches the default models into curate/models/ (gitignored) unless the project's config.toml
    points [models] at user-supplied files or --skip-models is given:
      - YuNet face detector from the OpenCV Zoo (Apache-2.0).
@@ -46,6 +51,9 @@ MODELS = HERE / "models"
 MANIFEST = MODELS / "manifest.json"
 REQUIREMENTS = HERE / "requirements.txt"
 TOOLS_FFMPEG = REPO / "tools" / "ffmpeg"
+
+sys.path.insert(0, str(HERE))
+from common import set_config_value  # noqa: E402  (standard library only, so it runs before the venv exists)
 
 YUNET_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 YUNET_FILE = "yunet.onnx"
@@ -129,9 +137,157 @@ def ensure_venv(venv: Path, install: bool) -> Path:
         r = run([str(py), "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
         r = run([str(py), "-m", "pip", "install", "--quiet", "-r", str(REQUIREMENTS)])
         if r.returncode != 0:
-            raise SystemExit(f"setup: pip install failed:\n{r.stderr[-2000:]}")
+            raise SystemExit(f"setup: pip install failed. It ran with Python {sys.version} ({sys.executable}); "
+                             f"the pins in {REQUIREMENTS.name} need Python 3.11 or newer, so a 'No matching distribution' "
+                             f"here usually means an older interpreter.\n{r.stderr[-2000:]}")
         say("  installed")
     return py
+
+
+# ---------------------------------------------------------------- 1b. what Step 0 detects
+
+# What a machine with no zone set reports; not a place, so it counts as "not detected".
+UTC_NAMES = {"utc", "etc/utc", "etc/uct", "uct", "gmt", "etc/gmt", "etc/gmt0", "etc/gmt+0", "etc/gmt-0", "gmt0",
+             "gmt+0", "gmt-0", "greenwich", "etc/greenwich", "universal", "etc/universal", "zulu", "etc/zulu"}
+_ZONE_SHAPE = re.compile(r"^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+)+$")
+
+
+def _py_output(py: Path, code: str) -> str:
+    """stdout of a one-liner run by the venv's Python, or '' when it fails (a package not installed, say)."""
+    try:
+        r = run([str(py), "-c", code], timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+def _is_zone(name: str, known: set[str]) -> bool:
+    """A real IANA key: listed by zoneinfo when this Python has a database, else at least Area/Location shaped."""
+    if not name or any(ch.isspace() for ch in name):
+        return False
+    return name in known if known else bool(_ZONE_SHAPE.match(name))
+
+
+def detect_timezone(py: Path) -> str:
+    """The build machine's IANA zone, or '' when nothing more specific than UTC can be found.
+
+    tzlocal in the venv first (it reads the Windows registry and macOS/Linux settings), then env TZ,
+    then the /etc/localtime symlink under a zoneinfo folder, then /etc/timezone. A UTC answer is
+    what containers and fresh servers report, not where the owner is, so it counts as not detected
+    and the intake asks."""
+    cands = [_py_output(py, "import tzlocal; print(tzlocal.get_localzone_name())"),
+             os.environ.get("TZ", "").lstrip(":")]
+    try:
+        target = os.readlink("/etc/localtime").replace("\\", "/")
+        if "zoneinfo/" in target:
+            cands.append(target.split("zoneinfo/", 1)[1])
+    except OSError:  # not a symlink, or no such file (Windows)
+        pass
+    try:
+        cands.append(Path("/etc/timezone").read_text(encoding="utf-8", errors="replace").strip())
+    except OSError:
+        pass
+    try:
+        import zoneinfo
+        known = set(zoneinfo.available_timezones())
+    except Exception:
+        known = set()
+    for c in cands:
+        c = (c or "").strip()
+        if c and c.lower() not in UTC_NAMES and _is_zone(c, known):
+            return c
+    return ""
+
+
+def detect_display() -> str:
+    """The logical resolution of this machine's screen as 'WxH', or '' when it cannot be read.
+
+    Windows: GetSystemMetrics without SetProcessDPIAware, so a scaled display reports the logical
+    size the browser viewport and VLC see. macOS: system_profiler's first 'UI Looks like', which is
+    the same thing, else its first 'Resolution' (the panel's pixels). Linux: the mode xrandr marks
+    current with a star. A headless session gives ''."""
+    try:
+        if WIN:
+            import ctypes
+            u = ctypes.windll.user32
+            w, h = int(u.GetSystemMetrics(0)), int(u.GetSystemMetrics(1))
+            return f"{w}x{h}" if w > 0 and h > 0 else ""
+        if MAC:
+            r = run(["system_profiler", "SPDisplaysDataType"], timeout=90)
+            text = r.stdout or ""
+            m = re.search(r"UI Looks like:\s*(\d+)\s*x\s*(\d+)", text) or re.search(r"Resolution:\s*(\d+)\s*x\s*(\d+)", text)
+            return f"{m.group(1)}x{m.group(2)}" if m else ""
+        xr = shutil.which("xrandr")
+        if xr:
+            r = run([xr, "--query"], timeout=30)
+            for ln in (r.stdout or "").splitlines():
+                m = re.match(r"^\s*(\d+)x(\d+)[a-z]?\s+.*\*", ln)
+                if m:
+                    return f"{m.group(1)}x{m.group(2)}"
+    except Exception:  # no window station, no DISPLAY, a tool that is not there: not detected
+        pass
+    return ""
+
+
+def build_os_name() -> str:
+    """'Windows 11', 'macOS 15.6', 'Ubuntu 24.04.1 LTS': what [machines] build_os records."""
+    if WIN:
+        try:
+            build = int(platform.version().split(".")[-1])
+        except ValueError:
+            build = 0
+        return "Windows 11" if build >= 22000 else f"Windows {platform.release()}"
+    if MAC:
+        v = platform.mac_ver()[0]
+        return f"macOS {v}" if v else "macOS"
+    try:
+        pretty = platform.freedesktop_os_release().get("PRETTY_NAME", "")
+    except (OSError, AttributeError):
+        pretty = ""
+    return pretty or f"Linux {platform.release()}"
+
+
+def detect_all(py: Path) -> dict[str, str]:
+    return {"timezone": detect_timezone(py), "display": detect_display(), "build_os": build_os_name()}
+
+
+def apply_detected(project: Path | None, detected: dict[str, str], apply: bool) -> None:
+    """Record what Step 0 found in config.toml with --apply; without it, print the lines to paste.
+
+    Only blanks are filled: a [project] timezone that is missing, blank or "UTC"; a missing or
+    blank [output] resolution; a blank [machines] build_os. An answer already in the config stands.
+    Comments and the order of the file are kept (common.set_config_value)."""
+    if project is None:
+        if apply:
+            say("  --apply needs --project <folder> with a config.toml in it; nothing written")
+        return
+    cfg_path = project / "config.toml"
+    with open(cfg_path, "rb") as f:
+        cfg = tomllib.load(f)
+
+    def current(section: str, key: str) -> str:
+        return str(cfg.get(section, {}).get(key, "") or "").strip()
+
+    wanted = []
+    if detected["timezone"] and current("project", "timezone") in ("", "UTC"):
+        wanted.append(("project", "timezone", detected["timezone"]))
+    if detected["display"] and not current("output", "resolution"):
+        wanted.append(("output", "resolution", detected["display"]))
+    if detected["build_os"] and not current("machines", "build_os"):
+        wanted.append(("machines", "build_os", detected["build_os"]))
+    if not wanted:
+        if not detected["timezone"] and not detected["display"]:
+            say(f"  nothing detected to write; the intake asks for the timezone and the display resolution")
+        else:
+            say(f"  {cfg_path.name} already records what was detected; nothing to write")
+        return
+    for section, key, value in wanted:
+        literal = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        if apply:
+            changed = set_config_value(cfg_path, section, key, literal)
+            say(f"  wrote [{section}] {key} = {literal} into {cfg_path}" if changed else f"  [{section}] {key} = {literal} was already there")
+        else:
+            say(f"  detected [{section}] {key} = {literal}; not written. Re-run with --apply, or paste that line under [{section}] in {cfg_path}")
 
 
 # ---------------------------------------------------------------- 2. the models
@@ -360,9 +516,12 @@ def pinned() -> list[tuple[str, str]]:
     return out
 
 
-def report(py: Path, project: Path | None) -> list[tuple[str, str, str]]:
+def report(py: Path, project: Path | None, detected: dict[str, str] | None = None) -> list[tuple[str, str, str]]:
     rows: list[tuple[str, str, str]] = []
     rows.append(("OS", f"{platform.system()} {platform.release()} ({platform.version()})", ""))
+    d = detected or {}
+    rows.append(("timezone", d.get("timezone") or "not detected", "config.toml [project] timezone"))
+    rows.append(("display", d.get("display") or "not detected", "logical resolution of the build machine's screen; [output] resolution"))
     rows.append(("CPU", f"{platform.machine()}, {os.cpu_count()} logical cores", platform.processor() or ""))
     rows.append(("memory", memory_gb(), ""))
     disk_at = project if project else REPO
@@ -390,6 +549,9 @@ def report(py: Path, project: Path | None) -> list[tuple[str, str, str]]:
         ver = first_line([p, "-version"]) if p else ""
         rows.append((t, (ver.split(" version ")[1].split(" ")[0] if " version " in ver else (ver or "MISSING")), p or ("see below" if WIN else "install ffmpeg 7+ (static build is fine)")))
     cv, cp = chrome_info()
+    configured = find_tool("chrome", project)     # [tools] chrome is the browser the render tries first
+    if configured and configured != cp and Path(configured).is_file():
+        cv, cp = (first_line([configured, "--version"]) or "configured"), configured + " ([tools] chrome)"
     rows.append(("google chrome", cv or "MISSING", cp or "needed by the render (Playwright channel 'chrome')"))
     vv, vp = vlc_info()
     rows.append(("vlc", vv or "MISSING", vp or "needed on the display machine"))
@@ -465,6 +627,8 @@ def setup_build(skip: bool) -> None:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="setup", description=__doc__.split("\n\n")[0])
     ap.add_argument("--project", help="project folder with config.toml; enables user-supplied model paths and writes environment.md")
+    ap.add_argument("--apply", action="store_true",
+                    help="write the detected timezone, display resolution and build OS into <project>/config.toml where they are blank (needs --project)")
     ap.add_argument("--venv", default=str(REPO / ".venv"), help="virtual environment path (default <repo>/.venv)")
     ap.add_argument("--skip-models", action="store_true", help="do not fetch the default models")
     ap.add_argument("--fetch-ffmpeg", action="store_true", help="Windows: download a static ffmpeg build into <repo>/tools/ffmpeg/ even if one is on PATH")
@@ -472,6 +636,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--skip-node", action="store_true", help="do not run npm install / playwright install in build/")
     ap.add_argument("--no-install", action="store_true", help="do not run pip, npm or downloads (report only)")
     a = ap.parse_args(argv)
+    if a.apply and not a.project:
+        say("setup: --apply needs --project <folder>")
+        return 2
 
     project = Path(a.project).expanduser().resolve() if a.project else None
     if project and not (project / "config.toml").is_file():
@@ -480,6 +647,8 @@ def main(argv: list[str]) -> int:
 
     say("environment")
     py = ensure_venv(Path(a.venv).expanduser().resolve(), install=not a.no_install)
+    detected = detect_all(py)
+    say(f"  timezone {detected['timezone'] or 'not detected'}; display {detected['display'] or 'not detected'}; build OS {detected['build_os']}")
     setup_models(project, a.skip_models)
     if WIN and not a.no_install and not a.skip_ffmpeg:
         have = find_tool("ffmpeg", project) and find_tool("ffprobe", project)
@@ -489,8 +658,10 @@ def main(argv: list[str]) -> int:
     setup_build(skip=a.skip_node or a.no_install)
 
     say("toolchain")
-    rows = report(py, project)
+    rows = report(py, project, detected)
     print_table(rows)
+    say("step 0")
+    apply_detected(project, detected, a.apply)
     missing = [r[0] for r in rows if r[1] == "MISSING"]
     if WIN and any(t in missing for t in ("ffmpeg", "ffprobe")):
         say("  ffmpeg is not installed. Re-run setup without --skip-ffmpeg to download a static build into tools/ffmpeg/, or install one from")

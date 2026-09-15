@@ -32,7 +32,7 @@ import warnings
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import project, write_atomic, say, media_id  # noqa: E402
+from common import GIF_EXT, VIDEO_EXT, project, write_atomic, say, media_id  # noqa: E402
 
 warnings.filterwarnings("ignore")
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")   # OpenCV 5 warns about backend targets on every YuNet create; harmless
@@ -54,9 +54,6 @@ FACE_NMS = 0.3
 LONG_SIDE = 1280           # decode target; detectors resize from here
 UNION_GRID = 512           # person_area is measured on a grid this wide (union of boxes, not a sum)
 GROUP_CAP = 6
-STILL_EXT = {".jpg", ".jpeg", ".heic", ".heif", ".png"}
-VIDEO_EXT = {".mov", ".mp4", ".m4v"}
-GIF_EXT = {".gif"}
 
 
 # ---------------------------------------------------------------- models and the manifest

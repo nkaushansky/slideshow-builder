@@ -1,13 +1,17 @@
 @echo off
 REM Slideshow launcher for Windows. Double-click to start.
-REM Plays slideshow-x3.mp4 from this same folder in VLC: fullscreen, looping, no OSD, no audio.
+REM Plays the rendered file from this same folder in VLC: fullscreen, looping, no OSD, no audio. The concatenated render
+REM slideshow-x<N>.mp4 (bin\render --concat; the first in name order) is preferred, then the single loop slideshow.mp4.
 REM Set SLIDESHOW_FILE to play a different file. To stop: press Esc in VLC, then close VLC (Ctrl+Q).
 REM Turn off screen sleep in Windows power settings, or run this from a session that holds a
 REM powercfg display request; the render and prep wrappers do that for their own runs.
 setlocal
-if defined SLIDESHOW_FILE (set "FILE=%SLIDESHOW_FILE%") else (set "FILE=%~dp0slideshow-x3.mp4")
-if not exist "%FILE%" (
-  echo slideshow-x3.mp4 not found next to this script in %~dp0 ^(or SLIDESHOW_FILE does not exist^)
+set "FILE="
+if defined SLIDESHOW_FILE if exist "%SLIDESHOW_FILE%" set "FILE=%SLIDESHOW_FILE%"
+if not defined FILE for /f "delims=" %%f in ('dir /b /on "%~dp0slideshow-x*.mp4" 2^>nul') do if not defined FILE set "FILE=%~dp0%%f"
+if not defined FILE if exist "%~dp0slideshow.mp4" set "FILE=%~dp0slideshow.mp4"
+if not defined FILE (
+  echo slideshow-x^<N^>.mp4 or slideshow.mp4 not found next to this script in %~dp0 ^(or SLIDESHOW_FILE does not exist^)
   pause
   exit /b 1
 )

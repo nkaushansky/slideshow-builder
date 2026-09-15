@@ -21,7 +21,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import write_atomic  # noqa: E402
+from common import VIDEO_EXT, write_atomic  # noqa: E402
 
 # ---------------------------------------------------------------- CSV in the project's style
 
@@ -478,7 +478,7 @@ def thumbnail(path: str, size: int, ffmpeg: str | None):
     except ImportError:
         pass
     ext = os.path.splitext(path)[1].lower()
-    if ext not in (".mov", ".mp4", ".m4v"):
+    if ext not in VIDEO_EXT:
         try:
             with Image.open(path) as im:
                 try:

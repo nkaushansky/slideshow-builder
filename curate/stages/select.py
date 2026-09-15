@@ -12,6 +12,12 @@ years); a Live Photo pair costs one slot and is represented by its still; no pic
 within the configured perceptual distance of one already seated; a bucket with no dissimilar
 candidate stays short. All four lenses are computed and written; `[selection] lens` (default
 v4) decides which one fills `selected`.
+
+The owner's `[show] off_limits` (filenames, media_ids, or a file or folder path) is applied
+before any other test and cuts with reason `off-limits`; a Live Photo pair goes together.
+`[show] must_include` entries are seated like `[pins] files`, matched by media_id, by the
+date-prefixed filename or by the original name; a miss is a printed warning, never silent.
+`[family] gate = "none"` skips the people check and says so.
 """
 from __future__ import annotations
 
@@ -19,14 +25,16 @@ import argparse
 import collections
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import project, say  # noqa: E402
+from common import DATE_PREFIX_LEN, project, say  # noqa: E402
 from stages._lenses import (CUT_COLS, SELECTION_COLS, STILL_TYPES, choose_featured, inum, km, lens_v1,  # noqa: E402
                             lens_v2, lens_v3, lens_v4, make_candidate, pscore, read_csv, write_csv)
 
-CUT_REASONS = ("over-cap", "no-family", "no-people", "undated", "superseded", "burst", "duplicate", "flagged")
+CUT_REASONS = ("off-limits", "over-cap", "no-family", "no-people", "undated", "superseded", "burst", "duplicate", "flagged")
+_DATE_PREFIXED = re.compile(r"^\d{4}-\d{2}-\d{2}_")
 
 
 def _location_reason(loc: str) -> str | None:
@@ -39,6 +47,17 @@ def _location_reason(loc: str) -> str | None:
     if "superseded" in loc:
         return "superseded"
     return "flagged"  # quarantine and anything else parked by validate
+
+
+def _name_forms(r: dict) -> set[str]:
+    """The lowercased names a config entry may use for a file: its date-prefixed filename, that
+    name without the prefix, and the original name it came in with."""
+    fname = r["filename"]
+    forms = {fname.lower(), (r.get("original_name") or "").lower()}
+    if _DATE_PREFIXED.match(fname):
+        forms.add(fname[DATE_PREFIX_LEN:].lower())
+    forms.discard("")
+    return forms
 
 
 def _anchor_pick(matches: list[dict]) -> dict | None:
@@ -70,9 +89,10 @@ def main(argv: list[str]) -> int:
     if not items:
         say("select: items.csv is empty")
         return 2
+    gate = P.people_gate
     people_path = P.index / "people.csv"
     people = {r["media_id"]: r for r in read_csv(people_path)} if people_path.is_file() else None
-    if people is None:
+    if people is None and gate != "none":
         say("select: WARNING no index/people.csv; the people gate is skipped and every file passes it. Run identify first for a real cut.")
     flags_path = P.index / "flags.csv"
     blocked = set()
@@ -87,7 +107,6 @@ def main(argv: list[str]) -> int:
     min_per_year = int(P.get("selection", "featured_min_per_year", 2))
     motion_per_month = int(P.get("selection", "motion_per_month", 1))
     caps = P.year_caps()
-    gate = P.people_gate
     if gate == "family":
         have_identity = people is not None and any((r.get("family_present") or "") == "yes" for r in people.values())
         if not have_identity:
@@ -100,6 +119,19 @@ def main(argv: list[str]) -> int:
             gate = "people"
 
     byname = {r["filename"]: r for r in items}
+
+    # ---- the owner's off-limits list: cut before any other test; a Live Photo pair goes together
+    off_warnings: list[str] = []
+    off = P.off_limits(off_warnings)
+    for w in off_warnings:
+        say("  !", w)
+    off_names = {n.lower() for n in off["filenames"]}
+    off_ids = {r["media_id"] for r in items if r["media_id"].lower() in off["media_ids"] or _name_forms(r) & off_names}
+    for r in items:
+        comp = byname.get(r.get("companion") or "")
+        if comp is not None and comp["media_id"] in off_ids:
+            off_ids.add(r["media_id"])
+
     reason: dict[str, str] = {}
     candidates: list[dict] = []
     unknown_people = 0
@@ -108,12 +140,15 @@ def main(argv: list[str]) -> int:
         mid, t, loc = r["media_id"], r.get("type", ""), r.get("location", "work")
         if t == "livephoto-video" and r.get("companion") in byname:
             continue  # rides with its still
+        if mid in off_ids:
+            reason[mid] = "off-limits"
+            continue
         lr = _location_reason(loc)
         if lr:
             reason[r["filename"]] = lr  # parked copies may share a media_id with their keeper
             continue
         if t == "other":
-            reason[mid] = "unsupported"   # an extension no stage can display (webp, avi, ...)
+            reason[mid] = "unsupported"   # an extension outside common.STILL_EXT / VIDEO_EXT / GIF_EXT
             continue
         if mid in blocked:
             reason[mid] = "flagged"
@@ -128,7 +163,9 @@ def main(argv: list[str]) -> int:
             continue
         p = people.get(mid) if people is not None else None
         known = bool(p) and str(p.get("persons", "")).strip() != ""
-        if people is None or not known:
+        if gate == "none":
+            pass  # no people requirement for this show; every dated candidate competes
+        elif people is None or not known:
             unknown_people += 1
         elif gate == "people":
             if inum(p.get("persons")) < 1 and inum(p.get("faces")) < 1:
@@ -170,16 +207,44 @@ def main(argv: list[str]) -> int:
             c = cand_by_name.get(str(fname)) or byid.get(str(fname))
             if c:
                 anchors[c["id"]].append(str(pn.get("tag", "PINNED")))
+    ids_by_name: dict[str, set[str]] = collections.defaultdict(set)   # over every indexed row, so a miss can say why
+    for r in items:
+        for form in _name_forms(r):
+            ids_by_name[form].add(r["media_id"])
     pins = set()
+    n_pinned = {"[pins] files": 0, "[show] must_include": 0}
     missing_pins = []
-    for f in P.pins():
-        c = cand_by_name.get(str(f)) or byid.get(str(f))
-        if c:
+    for label, entries in (("[pins] files", P.pins()), ("[show] must_include", P.must_include())):
+        for f in entries:
+            f = str(f).strip()
+            c = cand_by_name.get(f) or byid.get(f.lower())
+            if c is None:
+                hits = ids_by_name.get(f.lower(), set())
+                if len(hits) > 1:
+                    missing_pins.append(f"{f} ({label}: {len(hits)} files carry that name; use the media_id or the dated filename)")
+                    continue
+                mid = next(iter(hits), None)
+                row = next((r for r in items if r["media_id"] == mid), None) if mid else None
+                if row is not None and row.get("type") == "livephoto-video" and row.get("companion") in byname:
+                    mid = byname[row["companion"]]["media_id"]   # a Live Photo pair is seated through its still
+                c = byid.get(mid) if mid else None
+                if c is None:
+                    if not mid:
+                        why = "not in the index"
+                    elif mid in off_ids:
+                        why = "off-limits"
+                    elif mid in reason:
+                        why = f"cut: {reason[mid]}"
+                    else:
+                        parked = [reason[r["filename"]] for r in items if r["media_id"] == mid and r["filename"] in reason]
+                        why = f"cut: {parked[0]}" if parked else "not a candidate"
+                    missing_pins.append(f"{f} ({label}: {why})")
+                    continue
+            if c["id"] not in pins:
+                n_pinned[label] += 1
             pins.add(c["id"])
-        else:
-            missing_pins.append(str(f))
     if missing_pins:
-        say(f"select: WARNING {len(missing_pins)} pin(s) not among the candidates: {', '.join(missing_pins[:5])}")
+        say(f"select: WARNING {len(missing_pins)} pin(s) not among the candidates: {'; '.join(missing_pins[:5])}")
 
     # ---- the lenses, per year
     ranks = {k: {} for k in ("v1", "v2", "v3", "v4")}
@@ -224,7 +289,7 @@ def main(argv: list[str]) -> int:
         else:
             parked = _location_reason(r.get("location", "work"))
             selected = mid in chosen and not parked
-            rsn = "" if selected else (parked or reason.get(mid, "over-cap"))
+            rsn = "" if selected else ("off-limits" if mid in off_ids else (parked or reason.get(mid, "over-cap")))
             tg = tags4.get(mid, [])
             anchor_tags = [x for x in tg if x not in ("PIN", "MOTION", "MOTION-LP")]
             row = dict(media_id=mid, filename=r["filename"], selected="yes" if selected else "no",
@@ -245,6 +310,8 @@ def main(argv: list[str]) -> int:
     n_cut = len(cut_rows)
     balance = n_sel_items + n_companions + n_cut == len(items)
     say(f"select: lens {lens}, gate {gate}, diversity distance {sim}, {len(candidates)} candidates of {len(items)} rows")
+    if gate == "none":
+        say("  gate none: no people check ran; every dated candidate competed")
     if unknown_people:
         say(f"  ! {unknown_people} candidate(s) have no people data and passed the gate unchecked")
     if out_of_scope:
@@ -257,14 +324,17 @@ def main(argv: list[str]) -> int:
                                                sum(1 for c in sel_y if c["motion"]), sum(1 for c in sel_y if c["id"] in featured)))
     reasons = collections.Counter(r["reason"] for r in cut_rows)
     say("  cut reasons:", ", ".join(f"{k} {v}" for k, v in sorted(reasons.items())))
+    say(f"  off-limits {reasons.get('off-limits', 0)} ([show] off_limits resolves to {len(off['media_ids'])} media id(s) and "
+        f"{len(off['filenames'])} filename(s)); pins {len(pins)} seated "
+        f"({n_pinned['[pins] files']} from [pins] files, {n_pinned['[show] must_include']} from [show] must_include)")
     say(f"  accounting: {n_sel_items} selected + {n_companions} pair videos + {n_cut} cut = "
         f"{n_sel_items + n_companions + n_cut} of {len(items)} rows {'OK' if balance else 'MISMATCH'}")
     n_videos = sum(1 for c in candidates if c["id"] in chosen and c["type"] == "video")
     n_anchors = len(featured) + n_videos
     say(f"  featured {len(featured)} + standalone videos {n_videos} = {n_anchors} layout anchors "
         f"({(100 * n_anchors / n_sel_items) if n_sel_items else 0:.0f}% of items)")
-    say(f"  rough loop estimate: about {3 * n_sel_items // 60} min {3 * n_sel_items % 60:02d} s at 100 px/s "
-        f"(3 s per item, references/06); the build prints the real number")
+    say(f"  rough loop estimate: about {3 * n_sel_items // 60} min {3 * n_sel_items % 60:02d} s at the first run's pace "
+        f"(100 px/s on 1440 rows; [taste] scroll_speed scales it) (3 s per item, references/06); the build prints the real number")
     if not balance:
         say("select: the accounting does not balance; nothing written")
         return 1

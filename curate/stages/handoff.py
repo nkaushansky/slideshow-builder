@@ -5,9 +5,11 @@
 Copies every selected file (and its Live Photo companion) from work/ into handoff/media/
 byte-identical, verified by size and SHA-256 against media_id, and writes media.csv,
 features.txt, cut-list.csv, inventory.md and HANDOFF.md in the formats of
-references/02-index-contract.md. Creates an empty changes.log when there is none and never
-truncates an existing one. Prints the accounting invariant and exits non-zero if it does not
-balance: rows in media.csv + rows in cut-list.csv = files in the index, every file exactly once.
+references/02-index-contract.md, then show.json (the display, taste and off-limits settings the
+build reads; `python curate/run.py show` writes it alone). Creates an empty changes.log when
+there is none and never truncates an existing one. Prints the accounting invariant and exits
+non-zero if it does not balance: rows in media.csv + rows in cut-list.csv = files in the index,
+every file exactly once.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import media_id, project, say, write_atomic  # noqa: E402
+from common import SHOW_JSON_NAME, media_id, project, say, write_atomic, write_show_json  # noqa: E402
 from stages._lenses import CUT_COLS, MEDIA_COLS, STILL_TYPES, fnum, inum, read_csv, write_csv  # noqa: E402
 
 
@@ -46,6 +48,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--force", action="store_true", help="re-hash every file in handoff/media even if it was verified before")
     a = ap.parse_args(argv)
     P = project()
+
+    # the show settings are checked first, so a bad [output] or [taste] value fails before anything is copied
+    show_warnings: list[str] = []
+    show = P.show_settings(show_warnings)
+    for w in show_warnings:
+        say("  !", w)
 
     for need in ("items.csv", "selection.csv", "cut-list.csv"):
         if not (P.index / need).is_file():
@@ -145,7 +153,7 @@ def main(argv: list[str]) -> int:
     say(f"  media/: {verified} already verified, {len(to_copy)} to copy, {_human(total_bytes)} in the set")
     if a.dry_run:
         say(f"handoff: dry run; would copy {len(to_copy)} file(s) and write media.csv ({n_media} rows), features.txt "
-            f"({len(featured)} lines), cut-list.csv ({n_cut} rows), inventory.md, HANDOFF.md into {P.handoff}")
+            f"({len(featured)} lines), cut-list.csv ({n_cut} rows), inventory.md, HANDOFF.md, {SHOW_JSON_NAME} into {P.handoff}")
         return 0
 
     P.media.mkdir(parents=True, exist_ok=True)
@@ -247,7 +255,10 @@ def main(argv: list[str]) -> int:
          f"- `media.csv` carries one row per file with the columns of the index contract; `features.txt` lists the "
          f"{len(featured)} featured stills; `cut-list.csv` carries the {len(cuts)} files considered and not kept, with one-word reasons.",
          f"- The accounting invariant balances: {len(media_rows)} + {len(cuts)} = {len(items)} indexed files.",
-         f"- `changes.log` is {'present and untouched' if log.stat().st_size else 'empty'}; every change from here on goes through the apply tool.", "",
+         f"- `changes.log` is {'present and untouched' if log.stat().st_size else 'empty'}; every change from here on goes through the apply tool.",
+         f"- `{SHOW_JSON_NAME}` carries the display, taste and off-limits settings the build reads: {show['output']['width']}x{show['output']['height']} "
+         f"at {show['output']['fps']} fps, {show['taste']['tile_size']} tiles, off-limits resolved to {len(show['off_limits']['media_ids'])} media id(s) "
+         f"and {len(show['off_limits']['filenames'])} filename(s). Re-run `python curate/run.py show` after changing config.toml.", "",
          "## Special cases the build must handle", "",
          f"- HEIC stills: {heic}. Convert to JPEG during preparation (Pillow with pillow-heif on every platform).",
          f"- HEVC videos: {hevc}. Transcode clips to H.264 for the live player.",
@@ -278,10 +289,11 @@ def main(argv: list[str]) -> int:
           "- Every row's `media_id` is the SHA-256 of the file; recompute and compare after any move.",
           "- Every `companion` names a file in `media/` and the link is symmetric; every line of `features.txt` is a still.", ""]
     write_atomic(P.handoff / "HANDOFF.md", "\n".join(h))
+    write_show_json(P, show)
 
     say(f"handoff: media.csv {len(media_rows)} rows ({dict(sorted(types.items()))}), features.txt {len(featured)}, "
         f"cut-list.csv {len(cuts)} ({dict(sorted(reasons.items()))})")
-    say(f"handoff: wrote inventory.md and HANDOFF.md; changes.log {'kept' if log.stat().st_size else 'ready (empty)'}; folder {P.handoff}")
+    say(f"handoff: wrote inventory.md, HANDOFF.md and {SHOW_JSON_NAME}; changes.log {'kept' if log.stat().st_size else 'ready (empty)'}; folder {P.handoff}")
     return 0
 
 

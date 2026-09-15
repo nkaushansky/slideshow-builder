@@ -37,15 +37,13 @@ import sys
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common import project, write_atomic, say  # noqa: E402
+from common import STILL_EXT, VIDEO_EXT, project, write_atomic, say  # noqa: E402
 
 FLAG_COLUMNS = ["media_id", "filename", "gate", "severity", "detail", "suggested_action", "resolved_by", "resolved_on"]
 
 HEIC_EXT = {".heic", ".heif"}
 HEVC_CODECS = {"hevc", "h265", "hvc1", "hev1"}
 LIVE_TYPES = {"livephoto-still", "livephoto-video"}
-STILL_EXT = {".jpg", ".jpeg", ".heic", ".heif", ".png"}
-VIDEO_EXT = {".mov", ".mp4", ".m4v"}
 
 # Public release years of phone camera models, by the model string a camera writes into EXIF.
 # Used only when camera_model matches exactly (case-insensitive). A file cannot predate its camera.

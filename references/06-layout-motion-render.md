@@ -1,10 +1,10 @@
 # Layout, motion and render
 
-The build takes the frozen set and produces a browser player and a rendered video. Everything that moves is a pure function of elapsed time computed in the player's script, never a CSS animation, so the live player, the render and the scheduler simulator agree frame for frame. The numbers below are the first run's defaults; the intake and the owner's live-player round tune them.
+The build takes the frozen set and produces a browser player and a rendered video. Everything that moves is a pure function of elapsed time computed in the player's script, never a CSS animation, so the live player, the render and the scheduler simulator agree frame for frame. The numbers below are the first run's defaults; the intake and the owner's live-player round tune them. The display and taste numbers (resolution, frame rate, row heights, gutter, scroll speed, background) reach the build through `handoff/show.json`, derived in Python from `[output]` and `[taste]` in `config.toml` (`02-index-contract.md`); without that file the build falls back to the first run's values and says so.
 
 ## Output target
 
-Render at the display's **logical** resolution (2560×1440 for a 27-inch 5K panel), 60 fps, H.264, no audio. At viewing distances of five feet or more the eye cannot resolve more, and a native-5K render would quadruple render time and exceed hardware-decode limits on older machines. The deliverable is an mp4 that loops in VLC; the browser player exists to produce that mp4 deterministically and to serve as a live fallback.
+Render at the display's **logical** resolution (2560×1440 for a 27-inch 5K panel; 1920×1080 for most TVs), at the configured frame rate, H.264, no audio. The target is `[output]` in `config.toml`, read through `show.json`: `resolution` (Step 0 detects the build machine's display; a different display machine is the intake's answer), `fps` (60, or 30 to halve the render time and suit TVs and older laptops), `quality` (`final`: x264 slow, crf 18; `draft`: veryfast, crf 23, for quick test renders) and `concat_copies` (3). At viewing distances of five feet or more the eye cannot resolve more than the logical resolution, and a native-5K render would quadruple render time and exceed hardware-decode limits on older machines. The deliverable is an mp4 that loops in VLC; the browser player exists to produce that mp4 deterministically and to serve as a live fallback.
 
 ## Items and dates
 
@@ -23,20 +23,20 @@ Viewers glance for a minute or two, so every two-minute window should span the w
 6. **Rows never straddle a chapter boundary.** A rebalancing pass shifts items between neighbouring rows of the same chapter to even heights; chapter tails are pooled and re-split. The reset from the last year to the first is a clean row-to-row cut.
 7. A fixed `seed` for any randomness, so the sequence is reproducible and reviewable.
 
-Loop length is an output: item count, scroll speed and the share of feature rows set it. Expect about 3 seconds per item at 100 px/s with the default row mix.
+Loop length is an output: item count, scroll speed and the share of feature rows set it. Expect about 3 seconds per item at 100 px/s on 1440 rows with the default row mix; the pace scales with the screen height, so the seconds per item hold on any display.
 
 ## Layout: justified rows
 
 - Rows span the full width. Each item is scaled to the row's target height at its own aspect ratio; items are pulled until the row is full; the row is scaled to fill the width exactly. **No cropping, ever.** An item wider than about 2.4:1 takes a row alone.
-- Two row types: **base** (`baseRowHeight` 520 px, typically 4 to 5 items) and **feature** (`featureRowHeight` 820 px, 2 to 3 items). A row ends when its natural width crosses the screen; the straddling item joins unless that makes the row more than `fillBias` (0.1 in log-height) worse than stopping, so rows err short.
+- Two row types: **base** (`baseRowHeight` 520 px, typically 4 to 5 items) and **feature** (`featureRowHeight` 820 px, 2 to 3 items). The heights come from `[taste] tile_size` as a share of the screen height: `small` 0.28 and 0.44, `medium` 0.3611 and 0.5694 (520 and 820 at 1440 rows, the first run's), `large` 0.46 and 0.72 for a wall seen from across the room; each rounded to an even pixel count. `[taste] base_row_height` and `feature_row_height` in pixels override the preset. A row ends when its natural width crosses the screen; the straddling item joins unless that makes the row more than `fillBias` (0.1 in log-height) worse than stopping, so rows err short.
 - **Anchors** = the featured stills plus every standalone video. When the next item is an anchor, start a feature row; fill it by pulling further anchors from within `anchorLookahead` (6) positions, otherwise the next items in sequence. **Max one video per feature row.**
 - Any pull is allowed only if the pulled item is at most `pullMaxGap` (1.25 years) ahead of the item it jumps past; the owner flagged featured stills pulled a year and a half forward as out of place.
 - **Do the anchor arithmetic before building.** Anchors ÷ items sets the feature-row share. On the first run 129 anchors among 469 items (75 featured stills plus 54 videos) gave 83 feature rows of 134, or 62 percent, and a 15-minute loop where 12 had been expected. Print row counts and the share on every build.
-- `gutter` 8 px; background a near-black chosen to match the event's identity.
+- `gutter` 8 px at 2560 wide, scaled with the width and never under 4; background `[taste] background`, a near-black (`#07070F`) chosen to match the event's identity, painted on the page and the stage and behind every rendered frame.
 
 ## Media preparation
 
-- **Stills:** HEIC to JPEG at quality 90, then every still resized to a maximum height of twice the feature row (1640 px). Compute the resize from the index dimensions, not from the file, because some tools keep rotation as a tag rather than rotating pixels. Use Pillow with its HEIC plugin so the step works on every platform.
+- **Stills:** HEIC and webp to JPEG at quality 90, then every still resized to a maximum height of twice the feature row (`max_tile_height` in `show.json`; 1640 px at 2560×1440 medium). Compute the resize from the index dimensions, not from the file, because some tools keep rotation as a tag rather than rotating pixels. Use Pillow with its HEIC plugin so the step works on every platform (`sips` on macOS for JPEG, HEIC and PNG only). A display or tile-size change after preparation means `bin/prep --force`; `bin/build` warns when the prepared cap disagrees with `show.json`.
 - **Clips for live mode:** every Live Photo video, standalone video and GIF to H.264, `-preset veryfast -crf 20 -pix_fmt yuv420p`, no audio, faststart, display height capped like the stills. Do not rely on the browser's HEVC support.
 - **HDR:** 10-bit HLG or PQ videos come out washed out; tone-map to SDR BT.709 (`zscale` plus `tonemap=hable`, chosen on a contact frame over mobius and clip).
 - **Slow motion:** videos captured at 100 fps or more play at 30 fps, eight times slow, as the phone shows them; record the effective duration in the preparation manifest. A per-file real-time switch exists for the owner.
@@ -51,26 +51,27 @@ Loop length is an output: item count, scroll speed and the share of feature rows
 
 ## Player
 
-One HTML file opened from `file://`, manifest inlined as a script array because `fetch` is blocked on `file://`. Scroll position is `scrollSpeed × t`; rows are positioned from it and recycled through the ring so memory stays flat. Two modes: `live` (muted video tiles, the scheduler) and `render` (moving tiles are image elements whose source is the frame index for the clock; no video elements). Keyboard in live mode: fullscreen, pause, speed up and down. Review aids behind URL parameters only: labels, click-to-flag with notes persisted locally, a start time. A review page lists the whole sequence with thumbnails, names and entry times.
+One HTML file opened from `file://`, manifest inlined as a script array because `fetch` is blocked on `file://`. Scroll position is `scrollSpeed × t`; rows are positioned from it and recycled through the ring so memory stays flat. The stage is sized from the manifest's viewport and painted with its background at startup; nothing in the page is hard-coded to 2560×1440, and the review type scales with the height (19 and 22 px at 1440). Two modes: `live` (muted video tiles, the scheduler) and `render` (moving tiles are image elements whose source is the frame index for the clock; no video elements). Keyboard in live mode: fullscreen, pause, speed up and down. Review aids behind URL parameters only: labels, click-to-flag with notes persisted locally, a start time. In render mode `?labels=1` draws the same labels into every frame: per visible tile a translucent dark box at its bottom-left with the id on one line and `date · kind[ · featured][ · slow-mo]` on the next, per visible row a tag at its top-left reading `row i · chapter n · type · t=MmSSs`; nothing is drawn without the parameter. A review page lists the whole sequence with thumbnails, names and entry times.
 
 ## Render
 
-- A headless browser driven by Playwright (bundled Chromium, else installed Chrome via `channel: 'chrome'`), viewport at the output resolution, device scale factor 1, page served over local HTTP because images loaded from `file://` taint a canvas.
-- Per frame, the script calls the page with the exact time (k × 1000/60): the page sets its clock, updates rows and the scheduler, draws every visible tile into a canvas the size of the viewport, JPEG-encodes it and sends it over a WebSocket to the script, which pipes it into ffmpeg (`image2pipe`) and acknowledges once ffmpeg accepted it, so the page never runs ahead. **Why not screenshots:** the browser's screenshot path cost about 350 ms per frame on the first run's hardware, five hours per loop; the canvas path cost about 85 ms. Measure at Step 0.
-- Before frame 0, step the scheduler through several whole loops without drawing and compare a canonical snapshot of its state loop to loop until it repeats, so frame 0 carries the periodic state and the wrap is seamless. Then render **exactly one loop**: frame count = loop seconds × 60, frame 0 being the frame that follows the last. Check the wrap by PSNR between frame 0 and the frame after the last: identical, or stop.
-- Encode `libx264 -preset slow -crf 18 -pix_fmt yuv420p -r 60`, full-range JPEG converted to limited-range BT.709 and tagged.
-- **Always a 60-second test render first**, then window renders (`--from <seconds>`) around every special case. Only then the full render. Expect one to three hours on 2017-era hardware for a 15-minute loop; log the rate.
-- Concatenate three copies with stream copy so the player's own loop seam lands every 45 minutes rather than every 15. Soak in VLC for the length of the event window and read its log for late frames. Then the owner's full watch.
+- A headless browser driven by Playwright (`[tools] chrome` from `config.toml` when set and present, else bundled Chromium, else installed Chrome via `channel: 'chrome'`), viewport at the output resolution, device scale factor 1, page served over local HTTP because images loaded from `file://` taint a canvas.
+- Per frame, the script calls the page with the exact time (k × 1000/fps): the page sets its clock, updates rows and the scheduler, draws every visible tile into a canvas the size of the viewport, JPEG-encodes it and sends it over a WebSocket to the script, which pipes it into ffmpeg (`image2pipe`) and acknowledges once ffmpeg accepted it, so the page never runs ahead. **Why not screenshots:** the browser's screenshot path cost about 350 ms per frame on the first run's hardware, five hours per loop; the canvas path cost about 85 ms. Measure at Step 0.
+- Before frame 0, step the scheduler through several whole loops without drawing and compare a canonical snapshot of its state loop to loop until it repeats, so frame 0 carries the periodic state and the wrap is seamless. Then render **exactly one loop**: frame count = loop seconds × fps, frame 0 being the frame that follows the last. Check the wrap by PSNR between frame 0 and the frame after the last: identical, or stop.
+- Encode `libx264 -pix_fmt yuv420p` at the output frame rate, preset and crf from `[output] quality` (`final`: `-preset slow -crf 18`; `draft`: `-preset veryfast -crf 23`; `--preset` and `--crf` override), full-range JPEG converted to limited-range BT.709 and tagged. The log line names the quality preset.
+- **Always a 60-second test render first**, then window renders (`--from <seconds>`) around every special case. Only then the full render. `--labels` renders with the review labels drawn in and adds `-labels` to the file name, so an owner who is not at the machine can name any tile from a test render; the launchers never pick that file up. Expect one to three hours on 2017-era hardware for a 15-minute loop; log the rate.
+- `--concat` (`--x3` still works) concatenates `[output] concat_copies` copies (3) with stream copy into `slideshow-x<N>.mp4`, so the player's own loop seam lands every 45 minutes rather than every 15. The launchers look for `slideshow-x*.mp4` first, then `slideshow.mp4`. Soak in VLC for the length of the event window and read its log for late frames. Then the owner's full watch.
 - Playback: VLC, repeat one, fullscreen, OSD off, no audio, under the OS keep-awake tool; a desktop launcher that kills any running VLC and starts the file, with a fallback to a copy on a USB stick; the live player in the browser as the last resort.
 
 ## Tuning knobs
 
-One config block at the top of the build script, each overridable from the command line for a quick try:
+One config block at the top of the build script. `tile_size`, `scroll_speed`, `background`, `chapters` and `gutter` come from `config.toml` through `show.json` (`chapters` when not 0; `gutter` is derived from the width), taking effect on the next `python curate/run.py show` and `bin/build`; the rest are the script's own defaults. Command-line flags (`bin/build --speed 120`, `--base-height`, `--feature-height`, `--lookahead`, `--pull-gap`, `--disorder`, `--video-nudge`, `--start-visible`) beat both for a quick try:
 
 | Knob | Default | Trade-off |
 |---|---|---|
-| `scrollSpeed` | 100 px/s | slower reads easier and lengthens the loop; the owner compared 100 and 120 by eye |
-| `baseRowHeight`, `featureRowHeight` | 520, 820 | tile size against items per screen |
+| `tile_size` (`baseRowHeight`, `featureRowHeight`) | `medium` (520, 820 at 1440 rows) | `small`, `medium`, `large` as shares of the screen height: tile size against items per screen; `base_row_height` and `feature_row_height` in pixels override |
+| `scroll_speed` (`scrollSpeed`) | 0 = 100 px/s scaled to the height | slower reads easier and lengthens the loop; the owner compared 100 and 120 by eye |
+| `background` | `#07070F` | near-black; matched to the event's identity |
 | `chapters` | 10 | shorter chapters sweep the span more often but hold fewer items |
 | `anchorLookahead` | 6 | packs anchors into feature rows; raises the share |
 | `pullMaxGap` | 1.25 yr | fewer out-of-order pulls against more rows |
@@ -80,7 +81,7 @@ One config block at the top of the build script, each overridable from the comma
 | `videoPriority`, `rotateSlots`, `rotatePlays`, `maxWait`, `startVisibleFrac` | on, on, 1, 4 s, 1 | who moves when; see motion rules |
 | `livePhotoHold` | 1.5 s | the pause before a Live Photo restarts |
 | `minFill`, `fillBias` | 0.9, 0.1 | how short a row may be |
-| `gutter`, `seed` | 8 px, fixed | |
+| `gutter`, `seed` | 8 px at 2560 wide (scaled in `show.json`), fixed | |
 
 ## Acceptance checks
 
@@ -88,6 +89,6 @@ One config block at the top of the build script, each overridable from the comma
 - No row exceeds the width; nothing cropped; no feature row with two videos; every anchor in a feature row; no item across a chapter boundary.
 - Feature-row share printed and within what the owner accepted at the live-player round.
 - No frame with more than `movingCap` tiles moving.
-- Frame count exact; wrap identical; output resolution, frame rate, codec and no audio as specified; VLC plays at full speed with late frames only at start or seam.
+- Frame count exact; wrap identical; output resolution, frame rate, codec and no audio as `[output]` specifies; VLC plays at full speed with late frames only at start or seam.
 - The four special cases (slow motion, HDR, longest videos, the wrap) verified by content in window renders.
 - Update these checks in the brief when a rule changes; on the first run two checks stayed in the brief after the owner had overruled them.

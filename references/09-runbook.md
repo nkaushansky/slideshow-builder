@@ -3,7 +3,7 @@
 ## Before the hard stop
 
 - Additions cutoff the evening before the last render; one final render that night; the hard stop at least two days before the event so a found bug can be fixed and re-rendered (about two hours per render on older hardware).
-- Test the launcher by double-clicking it on the display machine. It opens a terminal that must stay open, kills any running player, and starts the file fullscreen under the keep-awake tool, with a fallback to a copy on a USB stick.
+- Test the launcher by double-clicking it on the display machine. It opens a terminal that must stay open, kills any running player, and starts the file fullscreen under the keep-awake tool, with a fallback to a copy on a USB stick. In each place it searches (beside the script, the project's `build/`, any USB stick) it takes the first `slideshow-x*.mp4` in name order (the `--concat` output, `slideshow-x3.mp4` with the default copies), then `slideshow.mp4` (the single loop); a `-labels` test render is never picked. Keep one of those two names on the stick and delete stale copies, or the wrong one plays.
 - Backups: the final file on the display machine, on a USB stick, and on one more machine. Two launchers on the stick, one per operating system, that play the file from their own folder.
 - The owner's full watch of the final video, all the way through, on the display machine.
 
