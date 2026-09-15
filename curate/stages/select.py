@@ -96,7 +96,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="rewrite outputs even if they exist (select always recomputes)")
     ap.add_argument("--lens", choices=("v1", "v2", "v3", "v4"), help="override [selection] lens")
-    ap.add_argument("--include-undated", action="store_true", help="let undated files compete (they bucket as year 0)")
+    ap.add_argument("--include-undated", action="store_true", help="let undated files compete; they get their own bucket, capped by [selection] undated_cap")
     ap.add_argument("--allow-presence-gate", action="store_true",
                     help="when the config asks for the family gate but identify has no identities yet, fall back to presence")
     a = ap.parse_args(argv)
@@ -136,7 +136,7 @@ def main(argv: list[str]) -> int:
         say("  !", w)
     unit = P.period_unit()
     caps = P.period_caps(plan)          # keyed by period: "2020", "2020-Q2" or "2020-05"
-    overrides = P.cap_overrides()
+    overrides = P.cap_overrides(periods=list(caps))
     lp_still = knobs["live_photos"] == "still"
     no_featured = ""
     if not knobs["mixed_tiles"]:

@@ -788,7 +788,7 @@ class Project:
         audio = self.audio_settings(warn)
         plan = self.cap_plan(disp, warn)
         # not in show.json, but checked here so the show stage catches a bad key before select does
-        self.cap_overrides()
+        self.cap_overrides(periods=list(self.period_shares()))
         self.selection_weights(warn)
         self.featured_rules()
 
@@ -829,6 +829,7 @@ class Project:
                 "seconds_per_item": plan["seconds_per_item"],
                 "target_items": plan["target_items"],
                 "year_shares": plan["year_shares"],
+                "period": plan["period"],
             },
             "machines": {"player": player, "display_os": str(self.get("machines", "display_os", "") or "")},
             "off_limits": {"media_ids": sorted(off["media_ids"]), "filenames": sorted(off["filenames"])},
@@ -924,6 +925,7 @@ def plan_of(settings: dict[str, Any]) -> dict[str, Any]:
     sel, t = settings["selection"], settings["taste"]
     return {"cap": sel["cap_per_year"], "source": sel["cap_source"], "loop_minutes_target": sel["loop_minutes_target"],
             "seconds_per_item": sel["seconds_per_item"], "target_items": sel["target_items"], "year_shares": sel["year_shares"],
+            "period": sel.get("period", "year"),   # a show.json from before 0.4 counted in years
             "tile_size": t["tile_size"], "scroll_speed": t["scroll_speed"]}
 
 

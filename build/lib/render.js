@@ -269,7 +269,10 @@ async function main() {
   if (cardPlan.length && opt.concat && cards.cardsOf(manifest).playback === 'once') {
     throw userError('[show] playback = "once" with --concat: copies of a show that ends are not a show. Render without --concat, or set playback = "loop" in config.toml and run python curate/run.py show');
   }
-  if (!cardPlan.length && (opt.seconds || opt.from) && cards.cardsOf(manifest).title) log('cards: skipped (they go on a full-loop render only)');
+  if (!cardPlan.length && (opt.seconds || opt.from)) {
+    const c = cards.cardsOf(manifest);
+    if (c.title || c.end) log('cards: skipped (they go on a full-loop render only)');
+  }
   log(`render: ${total} frames at ${fps} fps (${fmtTime(total / fps)})${k0 ? ` from frame ${k0} (t=${fmtTime(k0 / fps)})` : ''} -> ${C.rel(videoOut)}${AUDIO.enabled ? ` (silent; the soundtrack goes into ${C.rel(finalOut)})` : ''}; loop ${manifest.loop.frames} frames = ${fmtTime(manifest.loop.seconds)} at ${manifest.loop.speed.toFixed(3)} px/s; x264 ${opt.preset} crf ${opt.crf} (quality ${quality}${opt.tuned ? ', --preset/--crf given' : ''}), jpeg q ${opt.q}${opt.labels ? '; labels on' : ''}`);
   if (!SHOW) log('handoff/show.json missing; quality final (x264 slow, crf 18) and 3 concat copies assumed; run `python curate/run.py show`');
   if (!fs.existsSync(path.join(C.BUILD, 'player.html'))) throw new Error('player.html missing; run bin/build');

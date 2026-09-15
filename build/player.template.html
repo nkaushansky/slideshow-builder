@@ -70,10 +70,11 @@
   // review labels were drawn at 19 px / 22 px on 1440 rows; scale them with the screen so they read the same on any display
   const scaled = n => Math.round(n * VH / 1440);
   const LBL = { px: scaled(19), padX: scaled(10), padY: scaled(6), tagPx: scaled(22), tagPadX: scaled(10), tagPadY: scaled(4) };
+  const CAPBOX = { px: scaled(22), padX: scaled(10), padY: scaled(5) };   // the owner's captions, in the DOM and in the render
   { const rs = document.documentElement.style;
     rs.setProperty('--label-px', LBL.px + 'px'); rs.setProperty('--label-pad', `${LBL.padY}px ${LBL.padX}px`);
     rs.setProperty('--rowtag-px', LBL.tagPx + 'px'); rs.setProperty('--rowtag-pad', `${LBL.tagPadY}px ${LBL.tagPadX}px`);
-    rs.setProperty('--cap-px', scaled(22) + 'px'); rs.setProperty('--cap-pad', `${scaled(5)}px ${scaled(10)}px`);
+    rs.setProperty('--cap-px', CAPBOX.px + 'px'); rs.setProperty('--cap-pad', `${CAPBOX.padY}px ${CAPBOX.padX}px`);
     rs.setProperty('--card-px', scaled(96) + 'px'); }
   document.getElementById('card').style.background = CFG.background;
   // label text, shared by the DOM labels (live/review) and the ones drawn into render frames (?labels=1)
@@ -374,6 +375,20 @@
       cx.fillStyle = fg; lines.forEach((s, i) => cx.fillText(s, x + padX, top + padY + i * lineH));
       cx.restore();
     }
+    function drawCaptions(inst, top, h) {
+      for (const tl of inst.tiles) {
+        const text = captionText(tl.it);
+        if (!text) continue;
+        cx.font = `600 ${CAPBOX.px}px ${FONT}`;
+        let line = text;                               // the DOM ellipsises with CSS; the canvas has to do it itself
+        if (cx.measureText(line).width + 2 * CAPBOX.padX > tl.e.w) {
+          while (line.length > 1 && cx.measureText(line + '...').width + 2 * CAPBOX.padX > tl.e.w) line = line.slice(0, -1);
+          line += '...';
+        }
+        drawLabelBox([line], tl.e.x, LABELS ? top : top + h, !LABELS, `600 ${CAPBOX.px}px ${FONT}`,
+                     Math.round(CAPBOX.px * 1.25), CAPBOX.padX, CAPBOX.padY, '#fff', 'rgba(0,0,0,.55)', tl.e.w);
+      }
+    }
     function drawLabels(inst, top, h) {
       for (const tl of inst.tiles) drawLabelBox(tileLabel(tl.it).split('\n'), tl.e.x, top + h, true, `600 ${LBL.px}px ${FONT}`, Math.round(LBL.px * 1.25), LBL.padX, LBL.padY, '#fff', 'rgba(0,0,0,.62)', tl.e.w);
       drawLabelBox([rowLabel(inst.row)], 0, top, false, `700 ${LBL.tagPx}px ${FONT}`, Math.round(LBL.tagPx * 1.2), LBL.tagPadX, LBL.tagPadY, '#ffd', 'rgba(120,40,0,.75)', VW);
@@ -396,6 +411,7 @@
           cx.restore();
           drawn++;
         }
+        if (CAPTIONS !== 'none') drawCaptions(inst, top, h);
         if (LABELS) drawLabels(inst, top, h);
       }
       return { drawn, missing };
