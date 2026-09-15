@@ -203,7 +203,9 @@ def main(argv: list[str]) -> int:
             out_of_scope += 1
             continue
         p = people.get(mid) if people is not None else None
-        known = bool(p) and str(p.get("persons", "")).strip() != ""
+        # a row identify wrote is known: detection filled persons, or a tags pass filled family_present
+        # (a blank family_present on a tags pass means no tag named a family member, not "not looked at")
+        known = bool(p) and (str(p.get("persons", "")).strip() != "" or gate == "family")
         if gate == "none":
             pass  # no people requirement for this show; every dated candidate competes
         elif people is None or not known:

@@ -1,13 +1,21 @@
 """ingest: copy every source file into one flat work/ folder, hash it, verify it, and index the
-Takeout sidecars inside the zips before extracting anything.
+sidecars: the Takeout JSON inside the zips before extracting anything, and the JSON and .xmp files
+beside the media in a folder source (an unzipped Takeout, an Apple Photos export with IPTC as XMP).
 
     python curate/run.py ingest [--dry-run] [--force] [--workers N]
 
-Outputs: work/<flat files>, index/ingest.csv, index/takeout-sidecars.csv (Takeout sources only).
-Sources are never modified. The copy is a stream that hashes as it goes; the destination is hashed
-again afterwards and a row is `verified = yes` only when size and hash agree. Reruns skip verified
-rows, so a killed run is safe to restart. Basename collisions get the source path chain as a
-prefix, never a sequence number, so origin stays readable in the name.
+Outputs: work/<flat files>, index/ingest.csv, index/takeout-sidecars.csv (every sidecar of every
+source, `source` says which kind). Sources are never modified. The copy is a stream that hashes as
+it goes; the destination is hashed again afterwards and a row is `verified = yes` only when size
+and hash agree. Reruns skip verified rows, so a killed run is safe to restart. Basename collisions
+get the source path chain as a prefix, never a sequence number, so origin stays readable in the name.
+
+A sidecar is never copied as media: a .json that parses as a Takeout sidecar (photoTakenTime
+present) and every .xmp go into the sidecar index, and .aae files (Apple's edit recipes) are set
+aside; any other .json is copied like every file and cut as unsupported at select. ingest.csv's
+`source_path` is `<source label>!<path inside the source>` for a folder source and
+`<zip name>!<member path>` for a Takeout zip, one shape, so the index stage looks a file's sidecar
+up the same way for both.
 """
 from __future__ import annotations
 
@@ -21,10 +29,11 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import project, write_atomic, say, JUNK_FILES  # noqa: E402
-from stages import _takeout  # noqa: E402
+from stages import _takeout, _xmp  # noqa: E402
 
 INGEST_COLUMNS = ["media_id", "filename", "source_kind", "source_path", "bytes", "mtime", "verified", "note"]
 CHUNK = 1 << 20
@@ -78,8 +87,13 @@ def copy_hashing(src: str, dst: str) -> tuple[int, str]:
 
 # ---------------------------------------------------------------- planning
 
-def plan_folder(src_root: Path, kind: str, source_label: str) -> list[dict]:
-    items = []
+def plan_folder(src_root: Path, kind: str, source_label: str, tz) -> tuple[list[dict], list[dict], collections.Counter]:
+    """(files to copy, sidecar rows, counts) for one folder source. The counts say what was set
+    aside: `json` and `xmp` sidecars indexed, `aae` files skipped, `xmp_unreadable` files, and
+    `ambiguous` media files that two sidecars claimed (left to neither)."""
+    items: list[dict] = []
+    rows: list[dict] = []
+    counts: collections.Counter = collections.Counter()
     for root, dirs, names in os.walk(src_root):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for n in sorted(names):
@@ -89,10 +103,40 @@ def plan_folder(src_root: Path, kind: str, source_label: str) -> list[dict]:
             if not os.path.isfile(full):
                 continue
             rel = os.path.relpath(full, src_root).replace("\\", "/")
+            ext = os.path.splitext(n)[1].lower()
+            if ext == ".aae":            # an Apple edit recipe: nothing in it dates or names a file
+                counts["aae"] += 1
+                continue
+            if ext == ".xmp":
+                r = _xmp.read_sidecar(full, rel, tz)
+                if r is None:
+                    counts["xmp_unreadable"] += 1
+                    continue
+                r["source"] = "xmp"
+                rows.append(r)
+                counts["xmp"] += 1
+                continue
+            if ext == ".json" and os.path.getsize(full) <= _takeout.SIDECAR_MAX_BYTES:
+                r = _takeout.read_sidecar_file(full, rel)
+                if r is not None:
+                    r["source"] = "takeout-json"
+                    rows.append(r)
+                    counts["json"] += 1
+                    continue
+                # any other .json is copied like every file; select cuts it as unsupported
             chain = [source_label] + rel.split("/")[:-1]
-            items.append(dict(kind=kind, src=full, zip=None, member=None, rel=rel, name=n,
-                              chain=chain, size=os.path.getsize(full), mtime=os.path.getmtime(full)))
-    return items
+            items.append(dict(kind=kind, src=full, zip=None, member=None, rel=f"{source_label}!{rel}", path=rel,
+                              name=n, chain=chain, size=os.path.getsize(full), mtime=os.path.getmtime(full)))
+    if rows:
+        members_by_folder: dict[str, set[str]] = collections.defaultdict(set)
+        for i in items:
+            members_by_folder[os.path.dirname(i["path"])].add(i["name"])
+        for r in rows:
+            r["zip"] = source_label
+            if r["source"] == "xmp":     # named after the file's stem; a JSON resolves by the Takeout rules in finish_rows
+                r["media_member"] = _xmp.resolve_media_member(r["member"], members_by_folder.get(r["folder"], set()))
+        counts["ambiguous"] = _takeout.finish_rows(rows, members_by_folder)
+    return items, rows, counts
 
 
 def plan_takeout(src_root: Path, source_label: str, sidecar_out: Path, dry: bool) -> tuple[list[dict], list[dict]]:
@@ -173,6 +217,12 @@ def main(argv: list[str]) -> int:
     ingest_csv = index / "ingest.csv"
     sidecar_csv = index / "takeout-sidecars.csv"
 
+    try:
+        tz = ZoneInfo(P.timezone)   # an .xmp time without an offset is read in the project's zone
+    except Exception:
+        raise SystemExit(f"ingest: config [project] timezone {P.timezone!r} is not a known IANA zone "
+                         f"(on Windows the zone database comes from the tzdata package; it is in requirements.txt)")
+
     say(f"ingest: project {P.root}")
     for s in P.sources:
         if not s.path.exists():
@@ -187,9 +237,14 @@ def main(argv: list[str]) -> int:
         label = s.path.name if labels[s.path.name] == 1 else f"{s.path.parent.name}-{s.path.name}"
         if s.kind == "takeout":
             its, rows = plan_takeout(s.path, label, sidecar_csv, dry)
-            sidecar_rows.extend(rows)
         else:
-            its = plan_folder(s.path, s.kind, label)
+            its, rows, counts = plan_folder(s.path, s.kind, label, tz)
+            if rows or counts:
+                say(f"  {len(rows)} sidecars beside the files in {s.path.name}: {counts['json']} Takeout JSON, {counts['xmp']} .xmp; "
+                    f"{sum(1 for r in rows if r['media_member'])} resolved to a file, "
+                    f"{sum(1 for r in rows if r['title_collision'])} title collisions, {counts['ambiguous']} files claimed twice (left unresolved); "
+                    f"{counts['aae']} .aae files skipped, {counts['xmp_unreadable']} .xmp files unreadable")
+        sidecar_rows.extend(rows)
         say(f"  {len(its)} files, {sum(i['size'] for i in its) / 1e9:.2f} GB in {s.path.name}")
         items.extend(its)
     assign_names(items)
@@ -200,6 +255,13 @@ def main(argv: list[str]) -> int:
     todo, skipped = [], 0
     for i in items:
         r = existing.get(i["rel"])
+        if r is None and i["kind"] != "takeout":
+            # a 0.2 ingest.csv keyed folder files by the bare path; carry the row over to the labelled form
+            old = existing.pop(i["path"], None)
+            if old is not None:
+                old["source_path"] = i["rel"]
+                existing[i["rel"]] = old
+                r = old
         if r and r.get("verified") == "yes" and not a.force:
             skipped += 1
         else:

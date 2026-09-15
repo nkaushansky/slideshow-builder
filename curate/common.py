@@ -546,7 +546,10 @@ class Project:
             if path.suffix.lower() not in AUDIO_EXT:
                 raise ConfigError(f"[audio] files entry {x!r}: {path.suffix or 'no extension'} is not one of {' '.join(AUDIO_EXT)}")
             if not path.is_file():
-                raise ConfigError(f"[audio] files entry {x!r} does not exist (looked for {path})")
+                if enabled:
+                    raise ConfigError(f"[audio] files entry {x!r} does not exist (looked for {path})")
+                warn.append(f"[audio] files entry {x!r} does not exist (looked for {path}); audio is off, so it is only noted")
+                continue
             files.append(str(path.resolve()))
         if enabled and not files:
             raise ConfigError("[audio] enabled = true but files is empty; list the music files in play order, or set enabled = false")

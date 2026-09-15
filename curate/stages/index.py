@@ -3,10 +3,17 @@ Live Photo pairs, bursts, exact duplicates and GPS -> index/items.csv.
 
     python curate/run.py index [--dry-run] [--force] [--workers N]
 
-Date ladder (references/01 §2), most trusted first: Takeout photoTakenTime from the sidecar index
-(unless the sidecar is title-collided) > EXIF DateTimeOriginal > video container creation time in the
-project's timezone > owner priors only when config [priors] turns them on > nothing. File
-modification time is never used, and no date is ever inherited by filename stem alone.
+Date ladder (references/01 §2), most trusted first: the sidecar time from index/takeout-sidecars.csv
+(a Takeout photoTakenTime inside a zip or beside the file, or an .xmp capture time; unless the
+sidecar is title-collided) > EXIF DateTimeOriginal > video container creation time in the project's
+timezone > owner priors only when config [priors] turns them on (the calendar-folder rule, then the
+filename-month rule, then the folder-year rule: the nearest folder in the source path whose name
+holds a four-digit year dates the file to that year, precision year) > nothing. File modification
+time is never used, and no date is ever inherited by filename stem alone.
+
+A file's sidecar is found by its `source_path`, `<zip or source label>!<path>` for every kind of
+source: the exact source first, then any zip of the same Takeout (an export splits a folder across
+zips). The sidecar's people tags land in `people_tags` for the identify stage.
 
 Joins need a second witness (references/03 gate 1, 4): a Live Photo pair is written only when the
 video is 1-4 s long, its capture time is within 2 s of the still's, and its closest sampled frame is within 16
@@ -31,7 +38,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -43,7 +50,7 @@ ITEM_COLUMNS = ["media_id", "filename", "original_name", "source_kind", "source_
                 "companion", "width", "height", "duration_s", "fps", "hdr", "video_codec", "has_audio", "bytes",
                 "date", "precision", "date_source", "date_witness", "exif_datetime_original", "container_time",
                 "sidecar_time", "camera_make", "camera_model", "phash", "sharpness", "lat", "lon", "burst_group",
-                "duplicate_of", "pair_stem", "pair_dt_s", "pair_frame_dist"]
+                "duplicate_of", "pair_stem", "pair_dt_s", "pair_frame_dist", "people_tags"]
 
 LOCATIONS = ["work", "work/_burst-duplicates", "work/_duplicates", "work/_quarantine"]
 PAIR_DUR = (1.0, 4.0)
@@ -56,6 +63,8 @@ DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_")
 NORM_STEM = re.compile(r"(?:\s*\(\d+\)|\s+copy|[_-]original)+$", re.I)
 CAL_FOLDER = re.compile(r"(?<!\d)(\d{4})\s*[- _]?\s*calendar", re.I)
 YEAR_TOKEN = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+FOLDER_YEAR = re.compile(r"(?<!\d)(\d{4})(?!\d)")
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 MONTHS = {m.lower(): i for i, m in enumerate(
     ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"], 1)}
 MONTHS.update({k[:3]: v for k, v in list(MONTHS.items())})
@@ -97,6 +106,30 @@ def parse_dt(s: str | None):
         return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
+
+
+def folder_year(name: str) -> int | None:
+    """The first four-digit year from 1900 to next year in a folder's name, or None."""
+    latest = datetime.now().year + 1
+    for m in FOLDER_YEAR.finditer(name):
+        y = int(m.group(1))
+        if 1900 <= y <= latest:
+            return y
+    return None
+
+
+def source_folders(row: dict) -> list[str]:
+    """The folders between the source and the file, outermost first, from `source_path`
+    (`<zip or label>!<path>`). A folder source's own name counts as the outermost folder; a
+    zip's name does not, it is not a folder the owner named."""
+    src_path = (row.get("source_path") or "").replace("\\", "/")
+    label, sep, rel = src_path.partition("!")
+    if not sep:
+        label, rel = "", src_path
+    folders = rel.split("/")[:-1]
+    if label and row.get("source_kind") != "takeout":
+        folders = [label] + folders
+    return folders
 
 
 # ---------------------------------------------------------------- probe cache
@@ -141,7 +174,8 @@ def settle_date(row: dict, pr: dict, sidecar: dict | None, priors: dict, tz: Zon
     if sidecar and sidecar.get("photo_taken_ts"):
         try:
             ts = int(sidecar["photo_taken_ts"])
-            row["sidecar_time"] = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+            # arithmetic from the epoch, not fromtimestamp: Windows refuses negative timestamps, and a scan dated 1965 is one
+            row["sidecar_time"] = (EPOCH + timedelta(seconds=ts)).astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             row["sidecar_time"] = ""
     if row.get("sidecar_time") and sidecar.get("title_collision") != "yes":
@@ -154,11 +188,11 @@ def settle_date(row: dict, pr: dict, sidecar: dict | None, priors: dict, tz: Zon
         row.update(date=pr["container_dt"][:10], precision="day", date_source="container",
                    date_witness=f"video container creation time {row['container_time']} read in {tz.key}")
         return
-    # owner priors, only when the config turns them on
+    # owner priors, only when the config turns them on, in this order: the calendar folder, the month
+    # in the filename, the year in a folder's name
     year = month = None
     why = []
-    src_path = (row.get("source_path") or "").replace("\\", "/")
-    folders = src_path.split("!")[-1].split("/")[:-1]
+    folders = source_folders(row)
     if priors.get("calendar_folder_year_rule"):
         for f in folders:
             m = CAL_FOLDER.search(f)
@@ -177,6 +211,13 @@ def settle_date(row: dict, pr: dict, sidecar: dict | None, priors: dict, tz: Zon
                     year = int(y.group(1))
                     why.append(f"owner prior: year {year} named in the path")
             why.append(f"owner prior: month '{m.group(1)}' named in the filename")
+    if year is None and priors.get("folder_year_rule", False):
+        for f in reversed(folders):   # the nearest folder first
+            y = folder_year(f)
+            if y:
+                year = y
+                why.append(f"owner prior: folder '{f}' names the year {y}")
+                break
     if year is not None:
         if month is not None:
             row.update(date=f"{year:04d}-{month:02d}-00", precision="month")
@@ -220,7 +261,18 @@ def main(argv: list[str]) -> int:
 
     ingest_rows = read_csv(P.index / "ingest.csv")
     ingest_by_name = {r["filename"]: r for r in ingest_rows}
-    sidecars_by_member = {r["media_member"]: r for r in read_csv(P.index / "takeout-sidecars.csv") if r.get("media_member")}
+    sidecar_rows = [r for r in read_csv(P.index / "takeout-sidecars.csv") if r.get("media_member")]
+    sidecars_by_key = {(r.get("zip") or "", r["media_member"]): r for r in sidecar_rows}
+    # a Takeout splits a folder across zips, so a sidecar may sit in another zip than its file; a
+    # sidecar beside a file in a folder source is always in that source, so only zip rows fall back
+    sidecars_by_member = {r["media_member"]: r for r in sidecar_rows if (r.get("source") or "takeout-zip") == "takeout-zip"}
+
+    def sidecar_for(source_path: str) -> dict | None:
+        if "!" not in source_path:
+            return None
+        label, member = source_path.split("!", 1)
+        return sidecars_by_key.get((label, member)) or sidecars_by_member.get(member)
+
     prev_by_name = {r["filename"]: r for r in read_csv(items_csv)}
     cache = {} if a.force else load_cache(cache_path)
 
@@ -243,6 +295,9 @@ def main(argv: list[str]) -> int:
             f["media_id"] = prev["media_id"]
             f["original_name"] = prev.get("original_name") or f["filename"]
             f["source_kind"], f["source_path"] = prev.get("source_kind", ""), prev.get("source_path", "")
+            ing = ingest_by_name.get(f["original_name"])
+            if ing and "!" in (ing.get("source_path") or "") and f["source_path"] and "!" not in f["source_path"]:
+                f["source_path"] = ing["source_path"]   # a 0.2 index kept folder paths bare; ingest labels them now
         elif ing and ing.get("media_id"):
             f["media_id"] = ing["media_id"]
             f["original_name"] = f["filename"]
@@ -299,12 +354,12 @@ def main(argv: list[str]) -> int:
             r["duration_s"] = pr.get("dur", "")
         r["camera_make"], r["camera_model"] = pr.get("make", ""), pr.get("model", "")
         r["phash"], r["sharpness"] = pr.get("phash", "") or "", pr.get("sharp", "") if pr.get("sharp") is not None else ""
-        member = f["source_path"].split("!", 1)[1] if f["source_kind"] == "takeout" and "!" in f["source_path"] else None
-        sc = sidecars_by_member.get(member) if member else None
+        sc = sidecar_for(f["source_path"])
         if sc and sc.get("lat"):
             r["lat"], r["lon"] = sc["lat"], sc["lon"]
         elif pr.get("lat") is not None:
             r["lat"], r["lon"] = pr["lat"], pr["lon"]
+        r["people_tags"] = (sc.get("people") or "") if sc else ""
         settle_date(r, pr, sc, priors, tz)
         r["_dt"] = capture_dt(r, pr)
         r["_pr"] = pr
@@ -500,6 +555,9 @@ def main(argv: list[str]) -> int:
     say("  types: " + ", ".join(f"{v} {k}" for k, v in sorted(types.items())))
     say("  locations: " + ", ".join(f"{v} {k}" for k, v in sorted(locs.items())))
     say("  dates by source: " + ", ".join(f"{v} {k}" for k, v in sorted(srcs.items())))
+    n_sidecar = sum(1 for r in rows if r["sidecar_time"] or r["people_tags"])
+    say(f"  sidecars: {len(sidecar_rows)} rows indexed, {n_sidecar} files matched one, "
+        f"people tags on {sum(1 for r in rows if r['people_tags'])} files")
     say(f"  moved {moved}, renamed {renamed}, rename conflicts {conflicts}")
     say(f"accounting: {len(files)} files on disk = {len(rows)} rows, every file once")
     if errors:

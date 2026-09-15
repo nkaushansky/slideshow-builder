@@ -9,6 +9,11 @@ Rules from references/03 gate 5: key by member path, never by the `title` inside
 export keeps the original title even when it renames the member with a `(1)` suffix, so two
 sidecars in one folder can share a title; both are marked `title_collision` and the index stage
 leaves their dates to EXIF and the validate stage.
+
+The same sidecars turn up beside the files when a Takeout was unzipped into a folder source;
+ingest reads those with `read_sidecar_file` and runs them through `finish_rows`, the same
+collision and claim rules as the zip case. Every row says where it came from in `source`:
+`takeout-zip`, `takeout-json` (a file beside the media) or `xmp` (see `_xmp.py`).
 """
 from __future__ import annotations
 
@@ -26,7 +31,8 @@ from common import GIF_EXT, STILL_EXT, VIDEO_EXT  # noqa: E402
 MEDIA_EXT = STILL_EXT | VIDEO_EXT | GIF_EXT
 SIDECAR_MAX_BYTES = 64_000
 SIDECAR_COLUMNS = ["zip", "member", "title", "folder", "photo_taken_ts", "creation_ts", "lat", "lon",
-                   "people", "description", "title_collision", "media_member"]
+                   "people", "description", "title_collision", "media_member", "source"]
+SIDECAR_SOURCES = ("takeout-zip", "takeout-json", "xmp")
 
 _SUPP = re.compile(r"\.supplemental-metad[a-z]*$", re.I)
 _DUP = re.compile(r"^(.*)\.([A-Za-z0-9]+)\((\d+)\)$")
@@ -52,11 +58,27 @@ def zip_members(zpath: str) -> tuple[list[zipfile.ZipInfo], list[zipfile.ZipInfo
 
 
 def read_sidecar(zf: zipfile.ZipFile, member: str) -> dict | None:
-    """The fields the index needs, or None when the JSON is not a photo sidecar."""
+    """The fields the index needs from a sidecar inside a zip, or None when the JSON is not a photo sidecar."""
     try:
         d = json.loads(zf.read(member).decode("utf-8", errors="replace"))
     except Exception:
         return None
+    return sidecar_fields(d, member)
+
+
+def read_sidecar_file(path: str, member: str) -> dict | None:
+    """The same for a sidecar on disk (an unzipped Takeout, or a folder export that kept them);
+    `member` is the file's path relative to the source. None when it is not a photo sidecar."""
+    try:
+        with open(path, "rb") as f:
+            d = json.loads(f.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+    return sidecar_fields(d, member)
+
+
+def sidecar_fields(d, member: str) -> dict | None:
+    """The row for one parsed sidecar, or None when the JSON is not a photo sidecar."""
     if not isinstance(d, dict) or "photoTakenTime" not in d:
         return None
     g = d.get("geoData") or {}
@@ -91,28 +113,38 @@ def index_sidecars(zpaths: list[str], workers: int = 8, progress=None) -> tuple[
                 for r in ex.map(lambda i: read_sidecar(zf, i.filename), side):
                     if r:
                         r["zip"] = zname
+                        r["source"] = "takeout-zip"
                         rows.append(r)
         if progress:
             progress(zname, len(rows), len(media_by_member))
-    # title collisions: same folder (across zips), same title
-    by_title = collections.Counter((r["folder"], r["title"]) for r in rows if r["title"])
-    for r in rows:
-        r["title_collision"] = "yes" if by_title[(r["folder"], r["title"])] > 1 else ""
-    # media_member by member path
     members_by_folder: dict[str, set[str]] = collections.defaultdict(set)
     for mp in media_by_member:
         members_by_folder[os.path.dirname(mp)].add(os.path.basename(mp))
+    finish_rows(rows, members_by_folder)
+    return rows, media_by_member
+
+
+def finish_rows(rows: list[dict], members_by_folder: dict[str, set[str]]) -> int:
+    """Mark title collisions (same folder, same title) and settle each row's `media_member`: a row
+    that already carries one (an .xmp, resolved by its own naming) keeps it, the rest resolve by
+    the Takeout names. A file claimed by two sidecars is ambiguous and left to neither; the
+    number of such files is returned so the caller can say so."""
+    by_title = collections.Counter((r["folder"], r["title"]) for r in rows if r["title"])
+    for r in rows:
+        r["title_collision"] = "yes" if by_title[(r["folder"], r["title"])] > 1 else ""
     claims: dict[str, list[dict]] = collections.defaultdict(list)
     for r in rows:
-        mm = resolve_media_member(r["member"], members_by_folder.get(r["folder"], set()))
-        r["media_member"] = mm
-        if mm:
-            claims[mm].append(r)
+        if "media_member" not in r:
+            r["media_member"] = resolve_media_member(r["member"], members_by_folder.get(r["folder"], set()))
+        if r["media_member"]:
+            claims[r["media_member"]].append(r)
+    ambiguous = 0
     for mm, rs in claims.items():
         if len(rs) > 1:  # two sidecars claim one file: ambiguous, no automatic decision
             for r in rs:
                 r["media_member"] = ""
-    return rows, media_by_member
+            ambiguous += 1
+    return ambiguous
 
 
 def resolve_media_member(sidecar_member: str, names_in_folder: set[str]) -> str:

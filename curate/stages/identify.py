@@ -1,12 +1,21 @@
 """identify: who is in frame, per file, from index/items.csv into index/people.csv.
 
-Version 0.1 does **presence only**: a person detector (a YOLOv8-style ONNX model by default,
-or any detector the config names) gives the person count and how much of the frame people fill;
-a face detector (YuNet) gives the face count and the largest face. The identity gate, which
-matches faces against the owner's seed photos and fills ``people`` and ``family_present``, is a
-later milestone; those two columns are written blank here so the selection's family gate has
-somewhere to look once it exists. Presence is not identity (references/08, lesson 2): the sheets
-print these numbers so the reviewer knows what the detector saw, not who.
+Two witnesses, each on its own columns. **Presence** comes from detection: a person detector (a
+YOLOv8-style ONNX model by default, or any detector the config names) gives the person count and
+how much of the frame people fill; a face detector (YuNet) gives the face count and the largest
+face. **Identity** comes from the export's own people tags (``people_tags`` in items.csv, read by
+the index stage from the Takeout or .xmp sidecar), matched against ``[family] names``: ``people``
+lists the config names the tags name, ``family_present`` is ``yes`` when any tag matches, ``no``
+when the file has tags and none matches, blank when it has no tags. A tag matches a name when
+they are equal case-insensitively, or when the config name is a single word equal to the tag's
+first word (Google Photos says "Sam Jones" where the config says "Sam"). Face embeddings
+against the owner's seed photos are a later milestone. Presence is not identity (references/08,
+lesson 2): the sheets print the numbers and the names so the reviewer knows what was seen.
+
+``--tags-only`` runs without the detection models: persons and faces stay blank and the two
+identity columns are filled from the tags, which is enough for the family gate. A tags pass never
+erases a detection pass: with ``--force`` a row already in people.csv keeps its numbers and gets
+its identity columns refreshed. The normal detection run fills the identity columns the same way.
 
 Every image is EXIF-transposed before detection; the first run ran a whole pass on stored
 (rotated) pixels before that was fixed. Videos and GIFs are detected on their first frame
@@ -45,6 +54,7 @@ except ImportError:  # HEIC files will fail to open and be counted as errors, wh
 
 PEOPLE_COLUMNS = ["media_id", "filename", "persons", "person_area", "largest_person", "faces", "largest_face",
                   "group_size", "people", "family_present"]
+BLANK_COLUMNS = PEOPLE_COLUMNS[2:]
 DEFAULT_PERSON = "yolov8n.onnx"
 DEFAULT_FACE = "yunet.onnx"
 PERSON_CONF = 0.25
@@ -244,6 +254,37 @@ def load_frame(path: Path, ffmpeg: str | None, tmpdir: str):
         return im.convert("RGB")
 
 
+# ---------------------------------------------------------------- the export's people tags
+
+def split_tags(raw: str | None) -> list[str]:
+    """The names in a semicolon-separated people_tags value, blanks dropped."""
+    return [" ".join(t.split()) for t in (raw or "").split(";") if t.strip()]
+
+
+def match_tags(tags: list[str], names: list[str]) -> list[str]:
+    """The config names the tags name, in config order, each once. Equal case-insensitively, or a
+    single-word config name equal to the tag's first word; nothing looser, a tag is a witness."""
+    out = []
+    for name in names:
+        n = " ".join(str(name).split())
+        if not n:
+            continue
+        for t in tags:
+            if t.casefold() == n.casefold() or (" " not in n and t.split()[0].casefold() == n.casefold()):
+                if n not in out:
+                    out.append(n)
+                break
+    return out
+
+
+def identity_columns(row: dict, tags: list[str], names: list[str]) -> None:
+    """Fill people and family_present from the tags: yes when one names a family member, no when
+    the file has tags and none does, blank when it has none (nothing is known)."""
+    matched = match_tags(tags, names)
+    row["people"] = ";".join(matched)
+    row["family_present"] = "yes" if matched else ("no" if tags else "")
+
+
 # ---------------------------------------------------------------- main
 
 def read_csv(path) -> list[dict]:
@@ -273,12 +314,14 @@ def write_people(path, rows: list[dict]) -> None:
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="identify", description="person and face presence per file -> index/people.csv")
+    ap = argparse.ArgumentParser(prog="identify", description="person and face presence, and identity from the export's people tags, per file -> index/people.csv")
     ap.add_argument("--project", help="project folder (default: SLIDESHOW_PROJECT or a config.toml above the cwd)")
     ap.add_argument("--dry-run", action="store_true", help="report what would be detected, write nothing")
-    ap.add_argument("--force", action="store_true", help="re-detect files already in people.csv")
+    ap.add_argument("--force", action="store_true", help="re-detect files already in people.csv (with --tags-only: refresh their identity columns)")
     ap.add_argument("--all", action="store_true", help="include quarantined rows (bursts, duplicates), not only location=work")
     ap.add_argument("--limit", type=int, default=0, help="stop after this many files (for a quick check)")
+    ap.add_argument("--tags-only", action="store_true",
+                    help="no detection models: people and family_present from items.csv people_tags against [family] names; persons and faces stay blank")
     a = ap.parse_args(argv)
 
     P = project()
@@ -290,17 +333,46 @@ def main(argv: list[str]) -> int:
     items = read_csv(items_path)
     if not a.all:
         items = [r for r in items if (r.get("location") or "work") == "work" and not r.get("duplicate_of")]
-    done: dict[str, dict] = {}
-    if people_path.is_file() and not a.force:
-        done = {r["media_id"]: r for r in read_csv(people_path)}
+    existing: dict[str, dict] = {r["media_id"]: r for r in read_csv(people_path)} if people_path.is_file() else {}
+    done: dict[str, dict] = {} if a.force else dict(existing)
     todo = [r for r in items if r["media_id"] not in done]
     if a.limit:
         todo = todo[: a.limit]
+    names = P.family_names
+    n_tagged_all = sum(1 for r in items if split_tags(r.get("people_tags")))
+
+    if a.tags_only:
+        say(f"identify --tags-only: {len(items)} files, {len(done)} done, {len(todo)} to do; {n_tagged_all} files carry people tags; "
+            f"[family] names: {', '.join(names) if names else '(none)'}")
+        if not names:
+            say("  ! [family] names is empty in config.toml: no tag can match, every tagged file gets family_present = no")
+        if a.dry_run:
+            say("dry-run: nothing written")
+            return 0
+        results = dict(done)
+        n_tags = n_yes = n_no = n_kept = 0
+        for r in todo:
+            base = existing.get(r["media_id"])
+            row = dict(base) if base else {k: "" for k in BLANK_COLUMNS}   # a tags pass never erases a detection pass
+            n_kept += 1 if base and str(base.get("persons", "")).strip() != "" else 0
+            row.update(media_id=r["media_id"], filename=r["filename"])
+            tags = split_tags(r.get("people_tags"))
+            identity_columns(row, tags, names)
+            n_tags += 1 if tags else 0
+            n_yes += 1 if row["family_present"] == "yes" else 0
+            n_no += 1 if row["family_present"] == "no" else 0
+            results[r["media_id"]] = row
+        write_people(people_path, ordered_rows(items, results))
+        say(f"identify: {len(todo)} processed from tags | with tags {n_tags} | family yes {n_yes}, no {n_no}, unknown {len(todo) - n_tags}"
+            f"{f' | detection numbers kept on {n_kept}' if n_kept else ''}")
+        say(f"wrote {people_path} ({len(results)} rows)")
+        return 0
 
     ffmpeg = P.tool("ffmpeg")
     ffmpeg = ffmpeg if (os.path.isfile(ffmpeg) or shutil.which(ffmpeg)) else None
     n_video = sum(1 for r in todo if Path(r["filename"]).suffix.lower() in VIDEO_EXT)
-    say(f"identify: {len(items)} files, {len(done)} done, {len(todo)} to do ({n_video} videos, ffmpeg {'found' if ffmpeg else 'NOT found: videos will be skipped'})")
+    say(f"identify: {len(items)} files, {len(done)} done, {len(todo)} to do ({n_video} videos, ffmpeg {'found' if ffmpeg else 'NOT found: videos will be skipped'}); "
+        f"{n_tagged_all} files carry people tags, [family] names: {', '.join(names) if names else '(none)'}")
     if a.dry_run:
         say("dry-run: nothing detected, nothing written")
         return 0
@@ -315,15 +387,18 @@ def main(argv: list[str]) -> int:
 
     tmpdir = tempfile.mkdtemp(prefix="identify-")
     results = dict(done)
-    n_persons = n_faces = n_skipped = n_err = 0
+    n_persons = n_faces = n_skipped = n_err = n_tags = n_yes = 0
     try:
         for i, r in enumerate(todo, 1):
             path = P.work / r["filename"]
             loc = r.get("location") or "work"
             if loc != "work":
                 path = P.root / loc / r["filename"]
-            row = {"media_id": r["media_id"], "filename": r["filename"], "persons": "", "person_area": "", "largest_person": "",
-                   "faces": "", "largest_face": "", "group_size": "", "people": "", "family_present": ""}
+            row = {"media_id": r["media_id"], "filename": r["filename"], **{k: "" for k in BLANK_COLUMNS}}
+            tags = split_tags(r.get("people_tags"))
+            identity_columns(row, tags, names)
+            n_tags += 1 if tags else 0
+            n_yes += 1 if row["family_present"] == "yes" else 0
             try:
                 img = load_frame(path, ffmpeg, tmpdir) if path.is_file() else None
                 if img is None:
@@ -350,7 +425,8 @@ def main(argv: list[str]) -> int:
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    say(f"identify: {len(todo)} processed | with persons {n_persons} | with faces {n_faces} | skipped (no frame) {n_skipped} | errors {n_err}")
+    say(f"identify: {len(todo)} processed | with persons {n_persons} | with faces {n_faces} | skipped (no frame) {n_skipped} | errors {n_err}"
+        f" | with tags {n_tags}, family {n_yes}")
     say(f"wrote {people_path} ({len(results)} rows)")
     if n_skipped and not ffmpeg:
         say("  videos were skipped because ffmpeg was not found; set [tools] ffmpeg in config.toml or put it on PATH and re-run")

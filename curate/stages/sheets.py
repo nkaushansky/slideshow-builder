@@ -17,8 +17,10 @@ runs after whatever else the command wrote; --pdf alone re-bundles the sheets on
 default year pass skips sheets that are unchanged.
 
 Every sheet gets lines in index/sheets/index.md mapping numbers to filenames and media_ids.
-Spec: references/05-review-loop.md. Age-and-era outlier highlighting (gate 8) is not in 0.1;
-month- and year-precision dates are marked so the reviewer can watch those.
+Each tile's third line says what the identify stage saw: the detector's numbers (`p2 f2 a41%`,
+or `people ?` when it did not run) and, after a middle dot, the family names the export's tags
+name (`· Sam; Alex`). Spec: references/05-review-loop.md. Age-and-era outlier highlighting
+(gate 8) is not in 0.1; month- and year-precision dates are marked so the reviewer can watch those.
 """
 from __future__ import annotations
 
@@ -80,7 +82,8 @@ class SheetWriter:
               index_lines: list[str] | None = None) -> None:
         """entries/drops: dicts with num, item, text1, text2, color, gray. Skips when unchanged."""
         self.names.append(name)
-        key = hashlib.sha256(json.dumps([[e["num"], e["item"]["media_id"], e["text1"]] for e in (entries + (drops or []))]
+        # the presence line is part of the key, so a sheet made before identify ran is written again with the names
+        key = hashlib.sha256(json.dumps([[e["num"], e["item"]["media_id"], e["text1"], e.get("text3", "")] for e in (entries + (drops or []))]
                                         + [title, subtitle, self.TH, self.COLS]).encode()).hexdigest()
         out = self.P.sheets / f"{name}.jpg"
         prev = self.state.get(name, {})
@@ -219,9 +222,16 @@ def bundle_pdf(folder, dry: bool = False, planned: list[str] | None = None) -> i
 
 
 def _presence(pp: dict | None) -> str:
-    if not pp or str(pp.get("persons", "")).strip() == "":
+    """`p2 f2 a41%` from the detector (`people ?` when it did not run), then `· Sam; Alex` when the
+    export's tags name family members (people.csv `people`)."""
+    if not pp:
         return "people ?"
-    return f"p{inum(pp.get('persons'))} f{inum(pp.get('faces'))} a{100 * fnum(pp.get('person_area')):.0f}%"
+    if str(pp.get("persons", "")).strip() == "":
+        base = "people ?"
+    else:
+        base = f"p{inum(pp.get('persons'))} f{inum(pp.get('faces'))} a{100 * fnum(pp.get('person_area')):.0f}%"
+    names = [n.strip() for n in (pp.get("people") or "").split(";") if n.strip()]
+    return f"{base} · {'; '.join(names)}" if names else base
 
 
 def _entry(num: str, item: dict, sel: dict | None, pp: dict | None, color=(55, 80, 160), gray=False) -> dict:
@@ -285,6 +295,7 @@ def main(argv: list[str]) -> int:
             items[r["media_id"]] = r
     people_path = P.index / "people.csv"
     people = {r["media_id"]: r for r in read_csv(people_path)} if people_path.is_file() else {}
+    has_identity = any((r.get("family_present") or "").strip() for r in people.values())   # identify matched the export's tags
     flags_path = P.index / "flags.csv"
     flags = read_csv(flags_path) if flags_path.is_file() else []
     scores_path = P.index / "_select-scores.json"
@@ -329,10 +340,12 @@ def main(argv: list[str]) -> int:
                 drops.append(_entry(f"D{i}", items[mid], sel_by_id.get(mid), people.get(mid), gray=True))
                 lines.append(_index_line(f"D{i}", items[mid]))
             seen = sum(1 for mid in ids if inum(people.get(mid, {}).get("persons")) >= 1 or inum(people.get(mid, {}).get("faces")) >= 1)
+            family = sum(1 for mid in ids if people.get(mid, {}).get("family_present") == "yes")
+            fam_txt = f", family named in {family}" if has_identity else ""
             fl = flags_by_year.get(y)
             fl_txt = ("flags: " + ", ".join(f"{k} {v}" for k, v in sorted(fl.items()))) if fl else "no open flags"
             title = f"{y}   {P.honoree} {P.age_label(y)}".rstrip()
-            sub = (f"gate {P.people_gate}  |  {len(ids)} of cap {caps.get(y, 0)}  |  people detected in {seen} of {len(ids)}  |  {fl_txt}  |  "
+            sub = (f"gate {P.people_gate}  |  {len(ids)} of cap {caps.get(y, 0)}  |  people detected in {seen} of {len(ids)}{fam_txt}  |  {fl_txt}  |  "
                    f"*F* featured, LP Live Photo, (mo)/(yr) month- or year-precision date")
             W.write(f"{y}", title, sub, entries, drops, lines)
 
