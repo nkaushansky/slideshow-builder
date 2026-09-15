@@ -103,7 +103,7 @@ const OVERRIDES_FILE = [C.PROJECT && path.join(C.PROJECT, 'overrides.json'), pat
 const TEMPLATE = path.join(__dirname, '..', 'player.template.html');
 const PLAYER_OUT = path.join(C.BUILD, 'player.html');
 
-const opt = { quiet: false };
+const opt = { quiet: false, dryRun: false };
 {
   const a = process.argv.slice(2);
   for (let i = 0; i < a.length; i++) {
@@ -116,7 +116,8 @@ const opt = { quiet: false };
     else if (a[i] === '--feature-height') CONFIG.featureRowHeight = Number(a[++i]);
     else if (a[i] === '--base-height') CONFIG.baseRowHeight = Number(a[++i]);
     else if (a[i] === '--quiet') opt.quiet = true;
-    else if (a[i] === '-h' || a[i] === '--help') { console.log('usage: bin/build [--speed N] [--lookahead N] [--feature-height N] [--base-height N] [--quiet]'); process.exit(0); }
+    else if (a[i] === '--dry-run') opt.dryRun = true;
+    else if (a[i] === '-h' || a[i] === '--help') { console.log('usage: bin/build [--speed N] [--lookahead N] [--feature-height N] [--base-height N] [--dry-run] [--quiet]'); process.exit(0); }
     else { console.error('unknown argument ' + a[i]); process.exit(2); }
   }
 }
@@ -666,10 +667,16 @@ function main() {
     })),
     chapters: perChapter.map((c, k) => ({ index: k, firstRow: rows.findIndex(r => r.chapter === k), ...c })),
   };
-  fs.mkdirSync(C.BUILD, { recursive: true });
-  fs.writeFileSync(path.join(C.BUILD, 'manifest.json'), JSON.stringify(manifest));
+  // --dry-run does every computation and check and writes nothing: the layout, the acceptance checks and the whole
+  // report are what a real run would produce, so the owner can see what a knob would do before it lands
+  const write = (file, text) => {
+    if (opt.dryRun) { say(`       dry run: would write ${C.rel(file)} (${(Buffer.byteLength(text) / 1024).toFixed(0)} KB)`); return; }
+    fs.writeFileSync(file, text);
+  };
+  if (!opt.dryRun) fs.mkdirSync(C.BUILD, { recursive: true });
+  write(path.join(C.BUILD, 'manifest.json'), JSON.stringify(manifest));
   // the launchers read this beside the video: a show that plays once must not be told to repeat
-  fs.writeFileSync(path.join(C.BUILD, 'playback.txt'), PLAYBACK + '\n');
+  write(path.join(C.BUILD, 'playback.txt'), PLAYBACK + '\n');
 
   // ---- sequence.txt
   const mark = it => (it.kind === 'video' ? '[V]' : it.kind === 'live' ? '[L]' : it.kind === 'gif' ? '[G]' : '   ') + (it.featured ? '[F]' : '   ');
@@ -688,7 +695,7 @@ function main() {
     if (r.chapter !== lastChapter) { lastChapter = r.chapter; const c = perChapter[r.chapter]; lines.push(`== chapter ${r.chapter + 1}: ${c.items} items, ${c.rows} rows, ${c.feature} feature, ${c.videos} video rows ==`); }
     lines.push(`row ${String(i).padStart(3)} ${r.type === 'feature' ? 'FEATURE' : 'base   '} y=${String(r.y).padStart(6)} h=${String(r.h).padStart(4)}  ${r.items.map(it => `${mark(it)} ${it.id}`).join('   ')}`);
   });
-  fs.writeFileSync(path.join(C.BUILD, 'sequence.txt'), lines.join('\n') + '\n');
+  write(path.join(C.BUILD, 'sequence.txt'), lines.join('\n') + '\n');
 
   // ---- player.html
   let playerNote = 'no player.template.html yet, player.html not written';
@@ -697,11 +704,12 @@ function main() {
     if (!tpl.includes('/*__MANIFEST__*/')) problems.push('player.template.html lacks the /*__MANIFEST__*/ placeholder');
     else {
       const inlined = tpl.replace('/*__MANIFEST__*/', 'const MANIFEST = ' + JSON.stringify(manifest) + ';');
-      fs.writeFileSync(PLAYER_OUT, inlined);
+      write(PLAYER_OUT, inlined);
       // review copy: same player with flagging forced on, because macOS `open` strips ?review=1 from file:// URLs.
       const reviewPage = inlined.replace('const MANIFEST = ', 'window.__FORCE_REVIEW = true; const MANIFEST = ');
-      fs.writeFileSync(path.join(C.BUILD, 'player-review.html'), reviewPage);
-      playerNote = `player.html written (${(fs.statSync(PLAYER_OUT).size / 1024).toFixed(0)} KB), player-review.html too`;
+      write(path.join(C.BUILD, 'player-review.html'), reviewPage);
+      playerNote = opt.dryRun ? 'dry run: player.html and player-review.html not written'
+        : `player.html written (${(fs.statSync(PLAYER_OUT).size / 1024).toFixed(0)} KB), player-review.html too`;
     }
   }
 
@@ -731,7 +739,7 @@ function main() {
   say(`       playback: ${PLAYBACK === 'once' ? 'once through' : 'looping'}${CARDS.title ? `, title card ${JSON.stringify(CARDS.title.split('\n')[0])}` : ''}${CARDS.end ? `, end card ${JSON.stringify(CARDS.end.split('\n')[0])}` : ''}${(CARDS.title || CARDS.end) ? ` (${CARDS.seconds}s each, fade ${CARDS.fade_s}s)` : ''}`);
   if (PLAYBACK === 'loop' && CARDS.end) warnings.unshift('an end card is set but playback is "loop", so the show never reaches it; set [show] playback = "once" or clear [show] end_card');
   say(`       audio: ${audio.enabled ? `${audio.files.length} track(s) for the live player (${audio.files.map(f => path.posix.basename(f)).join(', ')}), ${audio.loop ? 'repeating' : 'once through'}, volume ${audio.volume}` : audioCfg.enabled ? 'not ready, see the warning below' : 'none' + (SHOW && SHOW.audio ? ' (show.json audio.enabled false)' : SHOW ? ' (this show.json predates [audio]; run python curate/run.py show)' : '')}`);
-  say(`       ${playerNote}; manifest.json, sequence.txt written to ${C.rel(C.BUILD)} (${C.fmtSecs(Date.now() - t0)})`);
+  say(`       ${playerNote}; manifest.json, sequence.txt ${opt.dryRun ? 'not written either (dry run)' : `written to ${C.rel(C.BUILD)}`} (${C.fmtSecs(Date.now() - t0)})`);
   const shown = warnings.filter(w => !/no prep output yet/.test(w));
   const missingPrep = warnings.length - shown.length;
   for (const w of shown.slice(0, 12)) say('  ! ' + w);

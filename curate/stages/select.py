@@ -400,12 +400,14 @@ def main(argv: list[str]) -> int:
             + (f", or too coarsely dated for period = \"{unit}\"" if unit != "year" else "") + ", cut as over-cap")
     if unit != "year":
         say(f"  period {unit}: {len(caps)} buckets, each with its own cap")
-    say(f"  {('period' if unit != 'year' else 'year'):7s} cap  cand   sel  motion  feat")
+    wide = unit != "year" or UNDATED_KEY in byyear      # "2020-Q2" and "undated" need more than four columns
+    say(("  period  cap  cand   sel  motion  feat" if wide else "  year   cap  cand   sel  motion  feat"))
     for y in sorted(byyear):
         L = byyear[y]
         sel_y = [c for c in L if c["id"] in chosen]
-        say("  %-7s %4d  %4d  %4d  %6d  %4d" % (y, caps.get(y, 0), len(L), len(sel_y),
-                                                sum(1 for c in sel_y if c["motion"]), sum(1 for c in sel_y if c["id"] in featured)))
+        fmt = "  %-7s %4d  %4d  %4d  %6d  %4d" if wide else "  %4s  %4d  %4d  %4d  %6d  %4d"
+        say(fmt % (y, caps.get(y, 0), len(L), len(sel_y),
+                   sum(1 for c in sel_y if c["motion"]), sum(1 for c in sel_y if c["id"] in featured)))
     reasons = collections.Counter(r["reason"] for r in cut_rows)
     say("  cut reasons:", ", ".join(f"{k} {v}" for k, v in sorted(reasons.items())))
     say(f"  off-limits {reasons.get('off-limits', 0)} ([show] off_limits resolves to {len(off['media_ids'])} media id(s) and "

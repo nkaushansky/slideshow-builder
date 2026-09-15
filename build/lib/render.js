@@ -266,8 +266,16 @@ async function main() {
   const cardFrames = cardPlan.reduce((n, c) => n + Math.round(c.seconds * fps), 0);
   const videoOut = cardPlan.length ? withSuffix(out, '-loop') : out;        // what the frame render writes
   const videoFrames = total + cardFrames;                                    // what `out` holds once the cards are on
-  if (cardPlan.length && opt.concat && cards.cardsOf(manifest).playback === 'once') {
+  if (opt.concat && cards.cardsOf(manifest).playback === 'once') {
     throw userError('[show] playback = "once" with --concat: copies of a show that ends are not a show. Render without --concat, or set playback = "loop" in config.toml and run python curate/run.py show');
+  }
+  // A show that used to loop may have left slideshow-x<N>.mp4 in the folder, and the launchers prefer it over
+  // slideshow.mp4: the venue would play the old looping copy, with no ending. Move it out of their way.
+  const stalePlan = [];
+  if (cards.cardsOf(manifest).playback === 'once' && !opt.seconds && !opt.from && !opt.labels) {
+    for (const f of fs.readdirSync(C.BUILD)) {
+      if (/^slideshow-x\d+\.mp4$/.test(f)) stalePlan.push(path.join(C.BUILD, f));
+    }
   }
   if (!cardPlan.length && (opt.seconds || opt.from)) {
     const c = cards.cardsOf(manifest);
@@ -327,6 +335,7 @@ async function main() {
         log(`    ${cmdLine(muxArgs(xnSilent, st2.out, xn + '.tmp'))}`);
       }
     }
+    for (const f of stalePlan) log(`  ${C.rel(f)} is a concatenated copy of a looping show and this show plays once; it would be renamed out of the launchers' way`);
     log('dry run: end of the plan; nothing was written');
     return;
   }
@@ -484,6 +493,8 @@ async function main() {
     } catch (e) { problems.push(String(e.message || e)); }
   }
   if (!problems.length) sizeNote(finalOut);
+  // the show plays once, so nothing that loops may keep a name the launchers prefer
+  if (!problems.length) for (const f of stalePlan) setAside(f, 'OLD', 'this show plays once and that file is a concatenated copy of a looping render');
 
   // 8. concat: N copies of the loop back to back (show.json output.concat_copies), so the player's own seam lands once
   //    per N loops; the launchers look for slideshow-x*.mp4 first. With music the silent copies are joined and one

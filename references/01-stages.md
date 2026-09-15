@@ -16,7 +16,7 @@ python curate/run.py sheets    [--with-drops] [--featured] [--alternates <year>]
 python curate/run.py handoff   [--dry-run]
 python curate/run.py show      [--dry-run]        handoff/show.json from config.toml, alone, after a config change
 build/bin/prep [--force] [--only <file>]... [--tiles-only|--clips-only|--audio-only] [--verify-only] [--dry-run]
-build/bin/build  build/bin/live  build/bin/apply-replacements <round>  (.cmd on Windows)
+build/bin/build [--dry-run]  build/bin/live  build/bin/apply-replacements <round>  (.cmd on Windows)
 build/bin/render [--seconds N] [--from <seconds>] [--labels] [--concat] [--dry-run]
 build/launchers/start-slideshow*.command|.bat      VLC on the display machine (plain and USB-stick editions);
                                                    start-slideshow-browser.* opens the live player in Chrome kiosk mode
