@@ -8,6 +8,12 @@ Methods, so the numbers in items.csv are reproducible:
 - width/height: displayed dimensions, i.e. stored size swapped when EXIF orientation is 5-8, and
   video stored size swapped when the rotation (display matrix or rotate tag) is +-90 or 270.
 - hdr: color_transfer smpte2084 or arib-std-b67, or a 10-bit pix_fmt (contains "10").
+- exif_dt/exif_dt_tag: the first EXIF time that parses, and which tag it came from: "original"
+  (DateTimeOriginal), "digitized" (DateTimeDigitized) or "modified" (DateTime, tag 306). The caller
+  needs the tag, because only the first two are capture times.
+- exif_capture_raw: the raw DateTimeOriginal as shipped, or DateTimeDigitized when there is no
+  original, whether or not it parses. It is keyed on the tag and not on the parse, so a zeroed
+  "0000:00:00 00:00:00" still reaches items.csv for the bogus-timestamp gate to see.
 """
 from __future__ import annotations
 
@@ -106,6 +112,8 @@ def probe_still(path: str) -> dict:
         orient = 1
         make = model = ""
         raw_dt = ""
+        dt_tag = ""
+        capture_raw = ""
         lat = lon = None
         try:
             ex = im.getexif()
@@ -118,10 +126,16 @@ def probe_still(path: str) -> dict:
                 orient = 1
             make = str(ex.get(MAKE) or "").strip("\x00 ")
             model = str(ex.get(MODEL) or "").strip("\x00 ")
-            for tag in (EXIF_DT_ORIGINAL, EXIF_DT_DIGITIZED, EXIF_DT):
+            # which tag the time came from is part of the answer: DateTimeOriginal and DateTimeDigitized are
+            # capture times, DateTime (306) is the modification stamp a scan or a re-export writes
+            for tag, label in ((EXIF_DT_ORIGINAL, "original"), (EXIF_DT_DIGITIZED, "digitized"), (EXIF_DT, "modified")):
                 v = _exif_value(ex, tag)
                 if v:
-                    raw_dt = str(v)
+                    raw_dt, dt_tag = str(v), label
+                    # the raw capture-class value goes back whether it parses or not, because a zeroed
+                    # "0000:00:00 00:00:00" is what the bogus-timestamp gate is there to catch
+                    if label in ("original", "digitized") and not capture_raw:
+                        capture_raw = str(v)
                     if parse_exif_datetime(raw_dt):
                         break
             try:
@@ -135,8 +149,10 @@ def probe_still(path: str) -> dict:
                     lat = lon = None
         if orient in (5, 6, 7, 8):
             w, h = h, w
+        parsed_dt = parse_exif_datetime(raw_dt)
         r.update(stored_w=im.size[0], stored_h=im.size[1], w=w, h=h, orient=orient,
-                 make=make, model=model, exif_raw=raw_dt, exif_dt=parse_exif_datetime(raw_dt),
+                 make=make, model=model, exif_raw=raw_dt, exif_dt=parsed_dt,
+                 exif_dt_tag=dt_tag if parsed_dt else "", exif_capture_raw=capture_raw,
                  lat=round(lat, 5) if lat is not None else None,
                  lon=round(lon, 5) if lon is not None else None)
         if im.format == "GIF":
@@ -346,7 +362,9 @@ def best_frame_distance(still_path: str, video_path: str, ffmpeg: str, fps: floa
                 cmd = [ffmpeg, "-v", "error", "-y", "-i", video_path, "-vf", f"fps={fps}", "-frames:v", str(max_frames), pat]
                 out = subprocess.run(cmd, capture_output=True, timeout=300)
                 if out.returncode != 0:
-                    return None, 0
+                    # a clip ffmpeg cannot decode must not end the index stage, and the caller unpacks three
+                    # values: every way out of here is a triple, and None means no frame witness
+                    return None, 0, None
                 for name in sorted(os.listdir(td)):
                     with Image.open(os.path.join(td, name)) as b:
                         b = b.convert("RGB")

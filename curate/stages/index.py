@@ -5,11 +5,14 @@ Live Photo pairs, bursts, exact duplicates and GPS -> index/items.csv.
 
 Date ladder (references/01 §2), most trusted first: the sidecar time from index/takeout-sidecars.csv
 (a Takeout photoTakenTime inside a zip or beside the file, or an .xmp capture time; unless the
-sidecar is title-collided) > EXIF DateTimeOriginal > video container creation time in the project's
-timezone > owner priors only when config [priors] turns them on (the calendar-folder rule, then the
-filename-month rule, then the folder-year rule: the nearest folder in the source path whose name
-holds a four-digit year dates the file to that year, precision year) > nothing. File modification
-time is never used, and no date is ever inherited by filename stem alone.
+sidecar is title-collided) > EXIF DateTimeOriginal or DateTimeDigitized > video container creation
+time in the project's timezone > owner priors only when config [priors] turns them on (the
+calendar-folder rule, then the filename-month rule, then the folder-year rule: the nearest folder in
+the source path whose name holds a four-digit year dates the file to that year, precision year) >
+the EXIF DateTime stamp (tag 306) as date_source "exif-modified" > nothing. Tag 306 is a
+modification stamp, so a scan or a re-export carries its scan or edit date there and it sits below
+the owner's priors, out of the exif_datetime_original column and flagged by validate. File
+modification time is never used, and no date is ever inherited by filename stem alone.
 
 A file's sidecar is found by its `source_path`, `<zip or source label>!<path>` for every kind of
 source: the exact source first, then any zip of the same Takeout (an export splits a folder across
@@ -156,6 +159,19 @@ def load_cache(path: Path) -> dict[str, dict]:
     return cache
 
 
+def cache_usable(d: dict) -> bool:
+    """False for a cached probe result this version cannot read, so the file is probed again.
+
+    A still cached before the probe recorded `exif_dt_tag` does not say whether its EXIF time came
+    from DateTimeOriginal or from the modification stamp, and guessing is exactly the mislabelling
+    the tag exists to stop; one cached before `exif_capture_raw` cannot say what the capture-class
+    tags held when nothing they held parsed. One re-probe per old file, once."""
+    if d.get("kind") in ("still", "gif") and not d.get("error") and (
+            "exif_dt_tag" not in d or "exif_capture_raw" not in d):
+        return False
+    return True
+
+
 def probe_one(mid: str, path: str, kind: str, ffprobe: str | None, tz: str) -> dict:
     d: dict = {"media_id": mid, "kind": kind}
     try:
@@ -178,7 +194,12 @@ def probe_one(mid: str, path: str, kind: str, ffprobe: str | None, tz: str) -> d
 
 def settle_date(row: dict, pr: dict, sidecar: dict | None, priors: dict, tz: ZoneInfo) -> None:
     """Fill date, precision, date_source, date_witness and the informational time columns."""
-    row["exif_datetime_original"] = pr.get("exif_raw") or ""
+    # the column holds what the capture-class tags shipped, parsed or not, and nothing else: a DateTime (tag 306)
+    # value there would read as an intact capture time to every later gate, while a zeroed DateTimeOriginal must
+    # reach the column or validate's bogus-timestamp gate never sees the stopped clock
+    exif_tag = pr.get("exif_dt_tag") or ""
+    exif_capture = pr.get("exif_dt") if exif_tag in ("original", "digitized") else None
+    row["exif_datetime_original"] = pr.get("exif_capture_raw") or ""
     row["container_time"] = pr.get("container_raw") or ""
     if sidecar and sidecar.get("photo_taken_ts"):
         try:
@@ -190,8 +211,9 @@ def settle_date(row: dict, pr: dict, sidecar: dict | None, priors: dict, tz: Zon
     if row.get("sidecar_time") and sidecar.get("title_collision") != "yes":
         row.update(date=row["sidecar_time"][:10], precision="day", date_source="sidecar", date_witness="")
         return
-    if pr.get("exif_dt"):
-        row.update(date=pr["exif_dt"][:10], precision="day", date_source="exif", date_witness="")
+    if exif_capture:
+        row.update(date=exif_capture[:10], precision="day", date_source="exif",
+                   date_witness="EXIF DateTimeDigitized; the file has no usable DateTimeOriginal" if exif_tag == "digitized" else "")
         return
     if pr.get("container_dt"):
         row.update(date=pr["container_dt"][:10], precision="day", date_source="container",
@@ -235,6 +257,12 @@ def settle_date(row: dict, pr: dict, sidecar: dict | None, priors: dict, tz: Zon
         else:
             row.update(date=f"{year:04d}-00-00", precision="year")
         row.update(date_source="prior", date_witness="; ".join(why))
+        return
+    # below the priors: the modification stamp is the last thing tried, and it says so in its own words
+    if exif_tag == "modified" and pr.get("exif_dt"):
+        row.update(date=pr["exif_dt"][:10], precision="day", date_source="exif-modified",
+                   date_witness="EXIF DateTime (tag 306) is a modification stamp, not a capture time; "
+                                "the file carries no usable DateTimeOriginal or DateTimeDigitized")
         return
     row.update(date="", precision="", date_source="", date_witness="")
 
@@ -326,7 +354,11 @@ def main(argv: list[str]) -> int:
     say(f"index: {len(files)} files in work/ ({hashed} hashed afresh), {len(cache)} probe results cached")
 
     # ---- probe
-    todo = [f for f in files if f["media_id"] not in cache and f["kind"] != "other"]
+    todo = [f for f in files if f["kind"] != "other"
+            and (f["media_id"] not in cache or not cache_usable(cache[f["media_id"]]))]
+    restale = sum(1 for f in todo if f["media_id"] in cache)
+    if restale:
+        say(f"  {restale} cached result(s) predate the EXIF tag record and are probed once more")
     if todo:
         if dry:
             say(f"[dry run] would probe {len(todo)} files; dates and pairs below are unknown until that runs")

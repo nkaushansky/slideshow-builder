@@ -187,7 +187,7 @@ function soundtrackPlan(playlist, D, target) {
   let fadeOutAt = Math.max(0, D - F), early = false;
   if (!AUDIO.loop && playlist.duration < D) { fadeOutAt = Math.max(0, playlist.duration - F); early = true; }
   if (F > 0) filters.push(`afade=t=in:st=0:d=${F}`, `afade=t=out:st=${fadeOutAt.toFixed(3)}:d=${F}`);
-  filters.push('apad');   // silence after the music when it ends early, so -t always yields D and -shortest never cuts the video
+  filters.push('apad');   // silence after the music when it ends early, so -t always yields exactly D and the mux gets a full-length track
   const args = ['-hide_banner', '-nostdin', '-v', 'error', '-y'];
   if (AUDIO.loop) args.push('-stream_loop', '-1');
   args.push('-i', playlist.file, '-t', D.toFixed(3), '-af', filters.join(','), ...AAC, out);
@@ -205,10 +205,14 @@ async function makeSoundtrack(playlist, D, target) {
   if (Math.abs(p.duration - D) > 0.5) throw new Error(`soundtrack ${C.rel(plan.out)} is ${p.duration.toFixed(2)}s, wanted ${D.toFixed(2)}s`);
   return plan.out;
 }
-// -shortest only guards against an encoder tail of a few milliseconds: the soundtrack is already cut to D. Returns the
-// problems found by probing the result (the muxed file must carry every frame of the silent one and D seconds of AAC).
+// No -shortest: the soundtrack is already cut to D and padded with apad, so the flag had nothing left to guard, and it cost
+// frames. AAC carries priming samples, so the audio stream ends about a tenth of a second before the video in the container's
+// timeline; -shortest took that for the end of the file and trimmed the last video frames (4,879 of 4,882 on the run that
+// found this), and the frame-count check below then set a good render aside as BAD-. Returns the problems found by probing
+// the result (the muxed file must carry every frame of the silent one, D seconds of AAC, and a container length within half
+// a second of D, which is the bound the flag used to give).
 const muxArgs = (silent, soundtrack, out) => ['-hide_banner', '-nostdin', '-v', 'error', '-y', '-i', silent, '-i', soundtrack,
-  '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'copy', '-shortest', '-movflags', '+faststart', '-f', 'mp4', out];
+  '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart', '-f', 'mp4', out];
 async function mux(silent, soundtrack, out, D, framesWanted) {
   const tmp = out + '.tmp';
   const r = await C.run(C.FFMPEG, muxArgs(silent, soundtrack, tmp));
@@ -222,17 +226,49 @@ async function mux(silent, soundtrack, out, D, framesWanted) {
   const j = await C.ffprobeJson(out);
   const v = (j.streams || []).find(s => s.codec_type === 'video'), a = (j.streams || []).find(s => s.codec_type === 'audio');
   const vFrames = v ? Number(v.nb_frames) || 0 : 0, aDur = a ? Number(a.duration) || 0 : 0;
+  const fileDur = Number((j.format && j.format.duration) || 0);
   log(`mux: ${path.basename(silent)} + soundtrack -> ${C.rel(out)}: video ${v ? v.codec_name : 'NONE'} ${vFrames} frames, audio ${a ? `${a.codec_name} ${a.channels} ch ${a.sample_rate} Hz ${aDur.toFixed(3)}s` : 'NONE'}, ${(fs.statSync(out).size / 1e6).toFixed(1)} MB`);
   const problems = [];
   if (!a) problems.push(`${C.rel(out)}: no audio stream after the mux`);
   else if (Math.abs(aDur - D) > 0.5) problems.push(`${C.rel(out)}: audio ${aDur.toFixed(2)}s differs from ${D.toFixed(2)}s by more than 0.5 s`);
   if (!v || vFrames !== framesWanted) problems.push(`${C.rel(out)}: ${vFrames} video frames after the mux, expected ${framesWanted}`);
+  // the length of the file itself, which is what a player shows and what -shortest used to bound: the frame count and the
+  // audio check are each about one stream, and neither says what the container ended up claiming
+  if (Math.abs(fileDur - D) > 0.5) problems.push(`${C.rel(out)}: the file is ${fileDur.toFixed(2)}s, ${D.toFixed(2)}s was wanted, more than 0.5 s out`);
   if (problems.length) {
     const aside = setAside(out, 'BAD', 'the muxed file failed its check');
     // the PROBLEMS list must name the file as it now is, not the name it lost
     if (aside) for (let i = 0; i < problems.length; i++) problems[i] = problems[i].split(C.rel(out)).join(C.rel(aside));
   }
   return problems;
+}
+// The wrap check compares two whole frames, which says that something moved but not what: this names the tiles. At t = 0 the
+// scroll position is 0, so the rows on screen are the ones whose y is above the viewport's bottom and each tile's box is the
+// row's y and h with the tile's own x and w, clipped to the viewport. Crop both wrap frames to that box and take the PSNR of
+// the pair, one ffmpeg call per tile (a handful of tiles, only on a failure). Sorted worst first; a tile whose crop failed to
+// measure is left out rather than reported as a suspect. Every edge of the box is floored to an even number, because row and
+// tile sizes are odd about half the time and ffmpeg's psnr filter refuses an odd crop on a 4:2:0 JPEG ("Failed to configure
+// input pad on Parsed_psnr"): a box a pixel short still names the right tile, while a box that would not measure took the
+// tile out of the list and could leave the worst one unnamed.
+const evenDown = n => Math.floor(n / 2) * 2;
+async function wrapTilePsnr(manifest, a, b) {
+  const VW = manifest.config.viewportW, VH = manifest.config.viewportH;
+  const tiles = [];
+  for (const row of manifest.rows) {
+    const top = evenDown(Math.max(0, row.y)), h = evenDown(Math.min(VH, row.y + row.h) - top);
+    if (h < 2) continue;
+    for (const e of row.items) {
+      const it = manifest.items[e.item];
+      const x = evenDown(Math.max(0, e.x)), w = evenDown(Math.min(VW, e.x + e.w) - x);
+      if (w < 2) continue;
+      const crop = `crop=${w}:${h}:${x}:${top}`;
+      const r = await C.run(C.FFMPEG, ['-v', 'error', '-i', a, '-i', b, '-lavfi', `[0:v]${crop}[c0];[1:v]${crop}[c1];[c0][c1]psnr=stats_file=-`, '-f', 'null', '-']);
+      const m = /psnr_avg:([\d.]+|inf)/.exec(r.out + r.err);
+      const db = m ? (m[1] === 'inf' ? Infinity : Number(m[1])) : NaN;
+      tiles.push({ id: it.id, row: row.i, kind: it.kind, moving: !!it.moving, db });
+    }
+  }
+  return tiles.filter(t => Number.isFinite(t.db)).sort((x, y) => x.db - y.db);
 }
 function sizeNote(file) {   // tv-usb: a FAT32 stick refuses a file of 4 GiB or more; a warning, never a failure
   const size = fs.statSync(file).size;
@@ -411,9 +447,13 @@ async function main() {
 
   // 5. frames
   let missingFrames = 0, maxPlaying = 0, lastReport = Date.now(), reportAt = 0;
+  // the clip frame every moving tile shows, at the first rendered frame and again one loop later; compared after the render
+  const movingFrames = async () => page.evaluate(() => (typeof window.__renderMovingFrames === 'function' ? window.__renderMovingFrames() : null));
+  let firstMoving = null, wrapMoving = null;
   const tStart = Date.now();
   for (let k = 0; k < total; k++) {
     const r = await page.evaluate(ms => window.__renderFrame(ms, true), (k0 + k) * 1000 / fps);
+    if (k === 0) firstMoving = await movingFrames();
     if (r.missing) missingFrames++;
     maxPlaying = Math.max(maxPlaying, r.playing);
     if (k + 1 === total || Date.now() - lastReport > 30000) {
@@ -425,6 +465,7 @@ async function main() {
   // wrap check: the frame that follows the last one must look like frame 0
   capturing = false;
   const wrap = await page.evaluate(ms => window.__renderFrame(ms, true), (k0 + total) * 1000 / fps);
+  wrapMoving = await movingFrames();
   ffmpeg.stdin.end();
   const code = await ffmpegDone;
   await browser.close();
@@ -443,13 +484,42 @@ async function main() {
   if (probe.hasAudio) problems.push('has audio');
   if (missingFrames) problems.push(`${missingFrames} frames had a moving tile without its frame file`);
   if (maxPlaying > manifest.config.movingCap) problems.push(`max moving ${maxPlaying} > cap`);
+  // the moving tiles whose clip frame at the wrap is not the one they began on, by the page's own key. The seam warning
+  // further down reports them, and the wrap remedy below asks whether the tile it is about to blame is one of them.
+  const slipped = (!opt.seconds && firstMoving && wrapMoving)
+    ? Object.keys(firstMoving).filter(k => wrapMoving[k] && wrapMoving[k].idx !== firstMoving[k].idx) : [];
   if (firstJpeg && wrapJpeg) {
     const tmpA = path.join(C.BUILD, 'wrap-first.jpg'), tmpB = path.join(C.BUILD, 'wrap-next.jpg'), tmpC = path.join(C.BUILD, 'wrap-last.jpg');
     fs.writeFileSync(tmpA, firstJpeg); fs.writeFileSync(tmpB, wrapJpeg); fs.writeFileSync(tmpC, lastJpeg);
     const psnr = async (a, b) => { const r = await C.run(C.FFMPEG, ['-v', 'error', '-i', a, '-i', b, '-lavfi', 'psnr=stats_file=-', '-f', 'null', '-']); const m = /psnr_avg:([\d.]+|inf)/.exec(r.out + r.err); return m ? m[1] : '?'; };
     const wrapPsnr = await psnr(tmpA, tmpB), stepPsnr = await psnr(tmpC, tmpB);
     log(`wrap check: frame 0 vs frame ${total} PSNR ${wrapPsnr} dB (identical = inf; the same content one frame apart is ~${stepPsnr} dB)${opt.seconds ? ' — partial render, the wrap only closes on a full loop' : ''}`);
-    if (!opt.seconds && wrapPsnr !== 'inf' && Number(wrapPsnr) < 40) problems.push(`wrap PSNR ${wrapPsnr} dB: frame 0 does not continue the last frame`);
+    if (!opt.seconds && wrapPsnr !== 'inf' && Number(wrapPsnr) < 40) {
+      // a number alone leaves the owner nothing to act on: name the tiles that moved, and say where to look for each kind
+      const worst = (await wrapTilePsnr(manifest, tmpA, tmpB)).slice(0, 3);
+      let culprit = '';
+      if (worst.length) {
+        culprit = worst[0].id;
+        log(`wrap: differs most in ${worst.map(t => `${t.id} (row ${t.row}, ${t.kind}): ${t.db.toFixed(1)} dB`).join('; then ')}`);
+        log(worst[0].moving
+          ? `  ${culprit} is a moving tile, so its clip is one frame off across the seam: a frame-index rounding problem in player.html (frameIndexFor)`
+          : `  ${culprit} is a still, so the scroll did not wrap on the pixel: loop.height and loop.speed in build/manifest.json are the place to look`);
+        if (worst[0].moving && !slipped.some(k => firstMoving[k].id === culprit))
+          log('  its frame index is the same at the start and at the wrap, though, so the scroll is the likelier cause after all: loop.height and loop.speed in build/manifest.json');
+      }
+      problems.push(`wrap PSNR ${wrapPsnr} dB: frame 0 does not continue the last frame${culprit ? `, worst tile ${culprit}` : ''}`);
+    }
+  }
+  // The PSNR above is the owner's test: it asks whether the wrap is visible. This one is the code's: a moving tile must
+  // restart on the clip frame it began on, and where its clock lands exactly on a frame boundary the two routes the render
+  // takes to that instant (the warm-up walking t = base + j * step, the loop setting t = k / fps) round the last bit the
+  // other way, which is what the EPS in player.html's frameIndexFor settles. Two frames of a clip can look the same, so
+  // that slip can pass the PSNR unseen and the guard would be gone without anyone noticing; the indices are exact and cost
+  // nothing. It is a warning and not a problem: identical pixels mean the owner sees nothing, so the render still stands.
+  if (slipped.length) {
+    const said = slipped.map(k => `${firstMoving[k].id} (row ${firstMoving[k].row}) frame ${firstMoving[k].idx + 1} at the start, ${wrapMoving[k].idx + 1} at the wrap`);
+    log(`  ! seam: ${slipped.length} moving tile(s) do not restart on the clip frame they began on: ${said.slice(0, 3).join('; ')}${said.length > 3 ? '; and more' : ''}`);
+    log('    the loop does not close exactly, by one frame index: look at frameIndexFor in player.html (the EPS there), and re-run bin/build in case player.html is stale');
   }
   log(`max moving tiles in one frame: ${maxPlaying} (cap ${manifest.config.movingCap}); total ${fmtTime((Date.now() - t0) / 1000)}`);
 

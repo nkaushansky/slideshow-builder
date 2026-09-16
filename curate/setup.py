@@ -1,17 +1,24 @@
 """setup: create the environment, install the pinned dependencies, fetch the models, report versions.
 
-    python curate/setup.py [--project <folder>] [--apply] [--venv <path>] [--skip-models] [--fetch-ffmpeg] [--no-install]
+    python curate/setup.py [--project <folder>] [--apply] [--venv <path>] [--skip-models]
+                           [--skip-node] [--fetch-ffmpeg] [--skip-ffmpeg] [--no-install]
 
-Plain script, no setuptools. What it does, in order:
+Plain script, no setuptools. Needs Python 3.11 or newer. What it does, in order:
 
-1. Creates a virtual environment at <repo>/.venv (or --venv) if there is none, and installs
+1. Creates a virtual environment at <repo>/.venv (or --venv, which then has to be named in
+   SLIDESHOW_VENV for run.py to find it) if there is none, and installs
    curate/requirements.txt into it with pip. Then detects what Step 0 of the intake would
    otherwise ask: the machine's IANA timezone (tzlocal in the venv, else TZ, /etc/localtime,
    /etc/timezone) and the logical resolution of its screen (GetSystemMetrics on Windows,
    system_profiler on macOS, xrandr on Linux). With --project --apply the detected values are
    written into config.toml where it is blank ([project] timezone when missing, blank or "UTC";
    [output] resolution; [machines] build_os); without --apply the lines to paste are printed.
-2. Fetches the default models into curate/models/ (gitignored) unless the project's config.toml
+2. On Windows, downloads the BtbN win64 GPL ffmpeg build into <repo>/tools/ffmpeg/ (gitignored)
+   and extracts ffmpeg.exe and ffprobe.exe whenever either is missing; --fetch-ffmpeg downloads one
+   even when there is already one on PATH, --skip-ffmpeg leaves it alone. On macOS and Linux it
+   only says where to get a build. Then installs the build side in build/ with npm (Playwright and
+   the Chromium the render uses) unless --skip-node.
+3. Fetches the default models into curate/models/ (gitignored) unless the project's config.toml
    points [models] at user-supplied files or --skip-models is given:
      - YuNet face detector from the OpenCV Zoo (Apache-2.0).
      - YOLOv8n person detector: downloads yolov8n.pt from the Ultralytics release assets and exports
@@ -20,14 +27,27 @@ Plain script, no setuptools. What it does, in order:
        locally and are never committed.
    Every model that identify may load is recorded in curate/models/manifest.json with its SHA-256,
    source, license and version. User-supplied models are recorded with license "user-supplied".
-3. Reports the toolchain: Python and each pinned package, Node, npm, Playwright, ffmpeg and ffprobe,
+   This step runs last and never ends setup: a download or an export that fails is a warning, one
+   model failing does not cost the other, and the rest of the toolchain is installed and reported.
+4. Reports the toolchain: Python and each pinned package, Node, npm, Playwright, ffmpeg and ffprobe,
    Google Chrome, VLC, plus OS, CPU, memory and free disk. With --project it also writes
    <project>/environment.md and warns when the project sits on a synced drive.
 
-On Windows without ffmpeg it says where to get a static build; --fetch-ffmpeg downloads the BtbN
-win64 GPL build into <repo>/tools/ffmpeg/ (gitignored) and extracts ffmpeg.exe and ffprobe.exe.
+--no-install reports only: no pip, no npm, no model download or export.
 """
 from __future__ import annotations
+
+import sys
+
+# Above every other import on purpose: tomllib is 3.11 and later, and so is common.py through it, so on
+# the very versions this message is for the import fails first and the person sees a ModuleNotFoundError
+# instead of a sentence. python.org's big download button also runs ahead of what the pins and the
+# ultralytics export have wheels for, which is the warning main() prints for 3.14 and newer.
+if sys.version_info < (3, 11):
+    print(f"setup: this needs Python 3.11 or newer; the one running it is "
+          f"{'.'.join(str(n) for n in sys.version_info[:3])} ({sys.executable}). "
+          f"Install 3.11 or newer and run setup with that interpreter.", flush=True)
+    raise SystemExit(2)
 
 import argparse
 import datetime as _dt
@@ -38,7 +58,6 @@ import platform
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import tomllib
 import urllib.request
@@ -392,24 +411,62 @@ def record_user_model(m: dict, name: str, purpose: str, path: str) -> None:
     say(f"  recorded user-supplied {purpose} model {p}")
 
 
+def _try_model(failures: list[str], label: str, step) -> None:
+    """Run one model step, so that the one that fails costs neither the other one nor the manifest.
+
+    The export is the long, fragile half of this script; a torch wheel that will not install must
+    not take a YuNet that downloaded fine with it. The reason is kept for the caller to report."""
+    try:
+        step()
+    except KeyboardInterrupt:
+        raise
+    except (SystemExit, Exception) as e:
+        failures.append(f"{label}: {str(e) or e.__class__.__name__}")
+
+
 def setup_models(project: Path | None, skip: bool) -> None:
     say("models")
     m = load_manifest()
     supplied = project_models(project)
+    failures: list[str] = []
     if supplied["person_detector"]:
-        record_user_model(m, "user-person-detector", "person detection", supplied["person_detector"])
+        _try_model(failures, "person detector",
+                   lambda: record_user_model(m, "user-person-detector", "person detection", supplied["person_detector"]))
     elif skip:
         say("  --skip-models: YOLOv8n not fetched (identify will refuse to run until it is listed in the manifest)")
     else:
-        export_yolo(m)
+        _try_model(failures, "person detector", lambda: export_yolo(m))
     if supplied["face_detector"]:
-        record_user_model(m, "user-face-detector", "face detection", supplied["face_detector"])
+        _try_model(failures, "face detector",
+                   lambda: record_user_model(m, "user-face-detector", "face detection", supplied["face_detector"]))
     elif skip:
         say("  --skip-models: YuNet not fetched")
     else:
-        fetch_yunet(m)
-    save_manifest(m)
+        _try_model(failures, "face detector", lambda: fetch_yunet(m))
+    save_manifest(m)                    # written for whatever did succeed, even when one model did not
     say(f"  manifest: {MANIFEST} ({len(m['models'])} model(s))")
+    if failures:
+        raise SystemExit("; ".join(failures))
+
+
+def setup_models_reported(project: Path | None, skip: bool, no_install: bool) -> None:
+    """The model step as main() runs it: last, and never able to end setup.
+
+    Before this, a torch failure in the export raised SystemExit before ffmpeg and Playwright were
+    installed and before the table printed, so one missing wheel left the machine with nothing."""
+    if no_install:
+        say("models")
+        say("  --no-install: nothing downloaded or exported (report only)")
+        return
+    try:
+        setup_models(project, skip)
+    except KeyboardInterrupt:
+        raise
+    except (SystemExit, Exception) as e:
+        say(f"  ! models not installed: {str(e) or e.__class__.__name__}")
+        say("    The pipeline still runs without them: identify --tags-only needs no model, and [family] gate =")
+        say("    \"family\" or gate = \"none\" work with it. Re-run `python curate/setup.py` later to try the")
+        say("    download again, or pass --skip-models to leave the models out.")
 
 
 # ---------------------------------------------------------------- 3. the report
@@ -543,7 +600,9 @@ def report(py: Path, project: Path | None, detected: dict[str, str] | None = Non
     if pw.is_file():
         rows.append(("playwright", json.loads(pw.read_text(encoding="utf-8")).get("version", "?"), str(pw.parent)))
     else:
-        rows.append(("playwright", "not installed", "run `npm install` in build/"))
+        # build/lib/common.js requires the package, so without it the render cannot start: MISSING,
+        # not a note, or setup would say "everything found" about a machine that cannot render.
+        rows.append(("playwright", "MISSING", "run `npm install` in build/"))
     for t in ("ffmpeg", "ffprobe"):
         p = find_tool(t, project)
         ver = first_line([p, "-version"]) if p else ""
@@ -554,7 +613,8 @@ def report(py: Path, project: Path | None, detected: dict[str, str] | None = Non
         cv, cp = (first_line([configured, "--version"]) or "configured"), configured + " ([tools] chrome)"
     rows.append(("google chrome", cv or "MISSING", cp or "needed by the render (Playwright channel 'chrome')"))
     vv, vp = vlc_info()
-    rows.append(("vlc", vv or "MISSING", vp or "needed on the display machine"))
+    # Not MISSING: VLC is only needed where the show plays, which may be another machine entirely.
+    rows.append(("vlc", vv or "not found", vp or "needed on the display machine"))
     return rows
 
 
@@ -597,11 +657,14 @@ def fetch_ffmpeg_windows() -> None:
 
 # ---------------------------------------------------------------- main
 
-def setup_build(skip: bool) -> None:
-    """Install the build side: Playwright (pinned in build/package.json) and its bundled Chromium."""
+def setup_build(skip: str) -> None:
+    """Install the build side: Playwright (pinned in build/package.json) and its bundled Chromium.
+
+    skip is the flag that turned this step off, or "" to run it; the message names the flag the person actually passed.
+    """
     say("build side")
     if skip:
-        say("  skipped (--skip-node)")
+        say(f"  skipped ({skip})")
         return
     npm = shutil.which("npm")
     npx = shutil.which("npx")
@@ -625,11 +688,20 @@ def setup_build(skip: bool) -> None:
 
 
 def main(argv: list[str]) -> int:
+    # the refusal of anything older than 3.11 is at the top of the file, where it can still be read.
+    if sys.version_info >= (3, 14):
+        say(f"setup: Python {platform.python_version()} is newer than the versions this port was tested with "
+            f"(3.11 to 3.13).")
+        say("  pip may report \"No matching distribution\" for a pinned package, or the model export may fail.")
+        say("  If either happens, install 3.13 from https://www.python.org/downloads/ (the release list below the")
+        say("  button) and run setup with that; it is the safe choice. Continuing.")
+
     ap = argparse.ArgumentParser(prog="setup", description=__doc__.split("\n\n")[0])
     ap.add_argument("--project", help="project folder with config.toml; enables user-supplied model paths and writes environment.md")
     ap.add_argument("--apply", action="store_true",
                     help="write the detected timezone, display resolution and build OS into <project>/config.toml where they are blank (needs --project)")
-    ap.add_argument("--venv", default=str(REPO / ".venv"), help="virtual environment path (default <repo>/.venv)")
+    ap.add_argument("--venv", default=str(REPO / ".venv"),
+                    help="virtual environment path (default <repo>/.venv; elsewhere, set SLIDESHOW_VENV to it for run.py)")
     ap.add_argument("--skip-models", action="store_true", help="do not fetch the default models")
     ap.add_argument("--fetch-ffmpeg", action="store_true", help="Windows: download a static ffmpeg build into <repo>/tools/ffmpeg/ even if one is on PATH")
     ap.add_argument("--skip-ffmpeg", action="store_true", help="Windows: do not download ffmpeg when it is missing")
@@ -646,16 +718,22 @@ def main(argv: list[str]) -> int:
         project = None
 
     say("environment")
-    py = ensure_venv(Path(a.venv).expanduser().resolve(), install=not a.no_install)
+    venv = Path(a.venv).expanduser().resolve()
+    py = ensure_venv(venv, install=not a.no_install)
+    if venv != (REPO / ".venv").resolve():
+        # run.py looks in <repo>/.venv and nowhere else unless it is told; without this line the stages
+        # would quietly run on the interpreter that started them and fail on the first import of Pillow.
+        say(f"  this is not <repo>/.venv, so set SLIDESHOW_VENV={venv} in the environment for run.py to find it")
     detected = detect_all(py)
     say(f"  timezone {detected['timezone'] or 'not detected'}; display {detected['display'] or 'not detected'}; build OS {detected['build_os']}")
-    setup_models(project, a.skip_models)
     if WIN and not a.no_install and not a.skip_ffmpeg:
         have = find_tool("ffmpeg", project) and find_tool("ffprobe", project)
         if a.fetch_ffmpeg or not have:
             say("ffmpeg")
             fetch_ffmpeg_windows()
-    setup_build(skip=a.skip_node or a.no_install)
+    setup_build(skip="--skip-node" if a.skip_node else "--no-install" if a.no_install else "")
+    # Last, because it is the step most likely to fail and the one the pipeline can do without.
+    setup_models_reported(project, a.skip_models, a.no_install)
 
     say("toolchain")
     rows = report(py, project, detected)
@@ -669,6 +747,9 @@ def main(argv: list[str]) -> int:
     elif any(t in missing for t in ("ffmpeg", "ffprobe")):
         say("  ffmpeg is not installed. macOS: `brew install ffmpeg`, or a static build from https://evermeet.cx/ffmpeg/ ; Linux: your package manager.")
         say("  Then put it on PATH or set [tools] ffmpeg and ffprobe in config.toml.")
+    if any(r[0] == "vlc" and r[1] == "not found" for r in rows):
+        say("  VLC was not found on this machine; it is needed only where the show plays (this one, if the same); "
+            "https://www.videolan.org/")
     if project:
         write_environment(project, rows)
         marks = [m for m in SYNCED_MARKERS if m in str(project).lower()]

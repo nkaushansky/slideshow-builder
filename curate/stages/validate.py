@@ -14,10 +14,13 @@ Gates (names are the ``gate`` column):
     prefix-exif-disagree      the settled date disagrees with the file's own intact EXIF or sidecar time
                               (block until a specific witness is named in date_witness)
     pair-unverified           a still and a video share a stem but the pair gate did not pass all three
-                              tests (duration 1-4 s, time within 2 s, first frame within 20 bits)
+                              tests (video 1-4 s long, capture times within 2 s, and the closest of the
+                              frames sampled across the clip within 16 bits of a 64-bit hash of the still)
     title-collision           the Takeout sidecar this file came from shares its title with another in
                               the same folder (block when a date was taken from it)
     owner-provisional         the date came from the owner's memory and no second source agrees yet
+    exif-modified             the date came from the EXIF modification stamp (DateTime, tag 306), which is
+                              the edit or scan date; the file carries no usable capture time
     content-match-unrecorded  date_source says content-match but no method and distance are recorded
     undated                   no date at all
     bogus-timestamp           a 1970 or 0000 timestamp in the metadata (a zeroed clock, not a date)
@@ -162,14 +165,45 @@ def run_gates(items: list[dict], sidecars: list[dict]) -> list[dict]:
             s, v = stills[0], videos[0]
             ev = []
             dur = v.get("duration_s") or ""
-            ev.append(f"video {dur or '?'} s" + ("" if dur and 1.0 <= float(dur) <= 4.0 else " (needs 1-4 s)"))
+            dur_ok = bool(dur) and 1.0 <= float(dur) <= 4.0
+            ev.append(f"video {dur or '?'} s" + ("" if dur_ok else " (needs 1-4 s)"))
             dt = v.get("pair_dt_s") or s.get("pair_dt_s") or ""
-            ev.append(f"time delta {dt or 'unknown'} s" + ("" if dt and abs(float(dt)) <= 2.0 else " (needs within 2 s)"))
+            dt_ok = bool(dt) and abs(float(dt)) <= 2.0
+            ev.append((f"capture times {dt} s apart" if dt else "capture times unknown") + ("" if dt_ok else " (needs within 2 s)"))
             fd = v.get("pair_frame_dist") or s.get("pair_frame_dist") or ""
-            ev.append(f"first-frame distance {fd or 'not computed'} bits" + ("" if fd and int(float(fd)) <= 20 else " (needs at most 20; requires ffmpeg)"))
+            # index computes the frame distance last and only when the duration and time gates have passed, so a
+            # blank one is almost never about ffmpeg; the video's blank probe columns are what says the tools were missing.
+            # With them filled and both gates passed there are three ways to reach a blank distance and no way to tell them
+            # apart from here: a clip ffmpeg cannot decode, a still with no perceptual hash, and an index --dry-run
+            unprobed = not any((v.get(c) or "").strip() for c in ("duration_s", "fps", "video_codec", "container_time"))
+            no_tool = "ffmpeg was not available when index ran"
+            not_run = "ffmpeg could not read the clip, or the still has no hash, or index ran as a dry run"
+            if fd:
+                why = ""
+                ev.append(f"closest sampled frame {fd} bits of 64 from the still"
+                          + ("" if int(float(fd)) <= 16 else " (needs at most 16)"))   # index.PAIR_FRAME_BITS
+            else:
+                why = (no_tool if unprobed else                             # no duration or codec either: no tools
+                       "the duration gate failed first" if not dur_ok else
+                       "the time gate failed first" if not dt_ok else not_run)
+                ev.append(f"closest sampled frame not computed ({why})")
+            if why == no_tool:
+                action = "re-run index with ffmpeg available; the frame test is the third witness and it never ran"
+            elif why == not_run:
+                action = "re-run index; if the pair stays unverified, treat them as two items or declare the pair with a witness"
+            elif not dur_ok:
+                action = "treat them as two separate items: a Live Photo's clip runs 1 to 4 s"
+            elif not dt_ok:
+                action = (f"the still's capture time and the clip's container time disagree by {abs(float(dt)):.0f} s; container "
+                          "times are UTC and are converted with [project] timezone in config.toml, so check that zone first, "
+                          "then declare the pair with a witness if they belong together" if dt else
+                          "one of the two carries no capture time, so there is nothing to compare; declare the pair with a "
+                          "witness if they belong together")
+            else:
+                action = "treat them as two separate items: the closest sampled frame is not the still's scene"
             for r in (s, v):
                 flag(r, "pair-unverified", "warn", "stem shared with " + (v if r is s else s)["filename"] + "; " + "; ".join(ev),
-                     "treat as two separate items; re-run index with ffmpeg available, or declare the pair with a witness")
+                     action)
             continue
         names = ", ".join(sorted(x["filename"] for x in group))
         for r in group:
@@ -218,7 +252,8 @@ def run_gates(items: list[dict], sidecars: list[dict]) -> list[dict]:
                 flag(r, "era-implausible", "block", f"camera '{r.get('camera_model')}' was released in {CAMERA_FIRST_YEAR[model]} but the file is dated {date}",
                      "the date is wrong; the camera is a hard witness against it")
 
-        # Gate 3: prefix versus intact metadata
+        # Gate 3: prefix versus intact metadata. A file dated from the EXIF modification stamp has no capture-class
+        # EXIF time that parses, so it cannot disagree here; the exif-modified gate below is its flag.
         if date and year is not None and prec:
             exif_stamp = parse_stamp(exif_raw) if not is_bogus(exif_raw) else None
             side_stamp = parse_stamp(side_raw) if not is_bogus(side_raw) else None
@@ -242,6 +277,13 @@ def run_gates(items: list[dict], sidecars: list[dict]) -> list[dict]:
         if src == "owner":
             flag(r, "owner-provisional", "warn", f"date {date} came from the owner's memory" + (f"; witness: {witness}" if witness else ""),
                  "keep provisional until a second source agrees (GPS, a sidecar, a matched file); then resolve this flag naming it")
+
+        # The EXIF modification stamp dated this file: it is the edit or scan date until the owner says otherwise
+        if src == "exif-modified":
+            flag(r, "exif-modified", "warn",
+                 f"dated {date} by the EXIF modification stamp (DateTime, tag 306); the file carries no usable "
+                 "DateTimeOriginal or DateTimeDigitized, so this is likely the edit or scan date",
+                 "confirm it on the contact sheet, or declare the date with a witness (validate --resolve)")
 
         # Gate 7: "content match" means a match ran
         if src == "content-match" and not has_method_and_distance(witness):

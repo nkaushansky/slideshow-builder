@@ -8,8 +8,9 @@ Default: one sheet per year of the proposed cut, thumbnails numbered so the owne
 number ("drop 7", "swap 12 for D3"). Drops for the year (cut as over-cap) are grayed below a
 line only with --with-drops, so a whole-life show stays at about fifteen sheets.
 --featured writes one sheet of the featured picks. --alternates YEAR writes the best unseated
-candidates for that year. --replacements FILE reads the live player's flags list (one filename
-per line, an optional note after it) and writes one sheet per flagged file with up to ten
+candidates for that year. --replacements FILE reads the live player's flags list (the player writes
+one tab-separated `filename<TAB>note<TAB>time` per line; a hand-written line with just a filename
+and an optional note after it is read too) and writes one sheet per flagged file with up to ten
 candidates from the cut list, plus index/sheets/replacements-pools.json.
 --pdf bundles every sheet in index/sheets/ into contact-sheets.pdf, one page per sheet (years
 ascending, then featured, alternates, replacements), for an owner who is not at the machine. It
@@ -405,15 +406,33 @@ def _replacement_pools(P, path: str, selection, items, people, scores, say) -> d
     """Per flagged file, up to ten cut candidates from the same weeks (references/05)."""
     from datetime import date as _date
     sim = int(P.get("selection", "diversity_distance", 26))
+    byname = {r["filename"]: r for r in items.values()}
+
+    def parse_flag_line(line: str) -> tuple[str, str]:
+        """(filename, note) from one line of the flags list.
+
+        The player writes `filename<TAB>note<TAB>time`, and a filename can hold spaces
+        ("2020-03-03_Screenshot 2020-03-03.png"), so the first whitespace token is only the last
+        resort: on its own it turned that name into a file the index had never heard of."""
+        if "\t" in line:
+            parts = line.split("\t")
+            return parts[0].strip(), " ".join(p.strip() for p in parts[1:] if p.strip())
+        if line in byname:
+            return line, ""
+        hits = [n for n in byname if line.startswith(n)]
+        if hits:
+            name = max(hits, key=len)        # the longest name that fits, so a note cannot eat part of it
+            return name, line[len(name):].strip()
+        name = line.split()[0].strip(",;")
+        return name, line[len(name):].strip()
+
     flagged = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            name = line.split()[0].strip(",;")
-            flagged.append((name, line[len(name):].strip()))
-    byname = {r["filename"]: r for r in items.values()}
+            flagged.append(parse_flag_line(line))
     set_bits = [phash_bits(items[r["media_id"]].get("phash", "")) for r in selection
                 if r["selected"] == "yes" and r["media_id"] in items]
     set_bits = [b for b in set_bits if b is not None]

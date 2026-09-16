@@ -59,6 +59,14 @@
   const CAPTIONS = ['date', 'text'].includes(CFG.captions) ? CFG.captions : 'none';
   const START_T = parseStart(params.get('t'));          // review aid: start the live player at this time, e.g. t=3m10s or t=190
   const HOLD = CFG.livePhotoHold, CAP = CFG.movingCap, FPS = CFG.frameFps;
+  // A tile's clock lands exactly on a frame or cycle boundary: slots are granted on the frame grid and clip lengths are
+  // whole frames, so a quantity like pos * FPS is a whole number in exact arithmetic. The render reaches that instant by two
+  // routes, the warm-up walking t = base + j * step and the render setting t = k / fps, and the two round the last bit the
+  // other way, so a bare floor can drop to the frame before on one path and not on the other. That is what broke the wrap
+  // check: frame 0 showed frame 71 of a clip and the frame after the last one showed 70. EPS is far below one frame
+  // (1 / FPS is tens of milliseconds) and far above that rounding error, so it picks the boundary both paths mean. Live
+  // playback never sits on such an edge, so it behaves as before.
+  const EPS = 1e-6;
   const MARGIN = RENDER ? 900 : 700;            // rows are created this far outside the viewport so media is ready
   const stage = document.getElementById('stage'), hud = document.getElementById('hud');
   function parseStart(v) { if (!v) return 0; const m = /^(?:(\d+)m)?(\d+(?:\.\d+)?)s?$/.exec(v); return m ? (Number(m[1] || 0) * 60 + Number(m[2])) : (Number(v) || 0); }
@@ -170,7 +178,9 @@
     return false;
   }
   function cycleOf(tl) { return tl.it.kind === 'video' ? Infinity : tl.clipLen + HOLD; }
-  function playsDone(tl) { return tl.it.kind === 'video' ? 0 : Math.floor((t - tl.startT + HOLD) / cycleOf(tl)); }
+  // EPS: a play ends exactly on a cycle boundary, and rotateSlots/maxWait hang off this count, so the two clock paths must
+  // agree on the frame where the count goes up
+  function playsDone(tl) { return tl.it.kind === 'video' ? 0 : Math.floor((t - tl.startT + HOLD + EPS) / cycleOf(tl)); }
   function priority(tl) { return (tl.it.kind === 'video' ? 0 : tl.served ? 2 : 1); }
   function request(tl) {
     tl.waitingSince = t;
@@ -276,10 +286,12 @@
     if (tl.frozenIdx != null) return tl.frozenIdx;
     if (!tl.slot) return 0;
     const u = t - tl.startT;
-    if (tl.it.kind === 'video') { const pos = u % tl.clipLen; return Math.min(tl.e.frameCount - 1, Math.floor(pos * FPS)); }
+    if (tl.it.kind === 'video') { const pos = u % tl.clipLen; return Math.min(tl.e.frameCount - 1, Math.floor(pos * FPS + EPS)); }
     const cycle = tl.clipLen + HOLD, pos = u % cycle;
-    if (pos >= tl.clipLen) return tl.e.frameCount - 1;                    // hold on the last frame
-    return Math.min(tl.e.frameCount - 1, Math.floor(pos * FPS));
+    // the hold starts exactly at clipLen, the same edge; either side of it the clamp below already gives the last frame,
+    // so the epsilon only keeps the two clock paths on the same branch
+    if (pos + EPS >= tl.clipLen) return tl.e.frameCount - 1;              // hold on the last frame
+    return Math.min(tl.e.frameCount - 1, Math.floor(pos * FPS + EPS));
   }
   function frameSrc(tl, idx) { return tl.e.frameDir + '/' + String(idx + 1).padStart(4, '0') + '.jpg'; }
   function setFrame(tl, idx) {
@@ -357,6 +369,18 @@
       return { t, scrollPos, active: active.size, playing: sched.granted.size, queued: sched.queue.length };
     };
     window.__renderInfo = () => ({ loop: M.loop, rows: rows.length, items: items.length, built: M.built });
+    // Which clip frame every moving tile on screen is showing, exactly. The wrap check compares pixels, and two frames of a
+    // clip can look the same, so a tile whose local clock slipped one frame across the loop seam (the rounding EPS guards
+    // against) can hide behind an identical picture and a PSNR of inf. These indices cannot hide it, and they name the tile.
+    // Keyed by row and tile x so bin/render can line the seam up with frame 0 tile by tile.
+    window.__renderMovingFrames = () => {
+      const out = {};
+      for (const inst of active.values()) {
+        if (inst.top >= VH || inst.top + inst.row.h <= 0) continue;
+        for (const tl of inst.tiles) if (tl.moving) out[inst.row.i + ':' + tl.e.x] = { id: tl.it.id, row: inst.row.i, idx: frameIndexFor(tl) };
+      }
+      return out;
+    };
     // Frame export: draw the visible tiles into a canvas (same geometry as the DOM) and ship the raw RGBA pixels to the
     // render script over a WebSocket. Chrome's own screenshot encoder needs ~350 ms per 2560x1440 frame and fetch() uploads
     // crawl at ~6 MB/s; a WebSocket moves the 14.7 MB frame in tens of milliseconds and the pixels stay lossless.

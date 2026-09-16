@@ -15,9 +15,9 @@ The files the curation stages hand to the build, and the formats every tool read
 | `fps`, `hdr` | frame rate and a 10-bit HDR flag, so slow motion and tone-mapping are known before preparation |
 | `date` | the settled date, equal to the filename prefix |
 | `precision` | `day`, `month`, `year` |
-| `date_source` | the rung that settled it: `sidecar`, `exif`, `container`, `prior`, `content-match`, `owner`, `visual` |
+| `date_source` | the rung that settled it: `sidecar`, `exif`, `container`, `prior`, `exif-modified`, `content-match`, `owner`, `visual`. `exif-modified` is the EXIF `DateTime` stamp (tag 306), the modification stamp a scan or a re-export writes, taken only when no rung above it answered, so the date is the edit or scan date until the owner says otherwise |
 | `date_witness` | one sentence naming the witness when the date is not the file's own metadata |
-| `exif_datetime_original` | the raw value as shipped, informational |
+| `exif_datetime_original` | the raw capture-class value as shipped, informational: `DateTimeOriginal`, or `DateTimeDigitized` when there is no original, whether or not it parses as a date, so a zeroed `0000:00:00 00:00:00` still reaches the bogus-timestamp gate; blank when the file's only EXIF time is the modification stamp, so no later gate reads that as an intact capture time |
 | `people` | family members present, semicolon-separated, from the identify stage |
 | `tag` | tradition or theme tags, semicolon-separated |
 | `featured` | `yes` for the larger-tile picks |
@@ -48,6 +48,8 @@ Every file considered and not kept: `media_id`, `filename`, `location` (which wo
 `index/items.csv` is the index stage's row per file: the `media.csv` columns above plus the index's own (`source_kind`, `source_path`, the probe facts, the hashes, the pairing evidence) and `people_tags`, the names the file's sidecar carries (Takeout `people[].name`, or XMP `PersonInImage`, else the region names), semicolon-separated, blank when there is no sidecar or it names nobody. The identify stage turns `people_tags` into `people` and `family_present` in `people.csv`. Its last column is `description`, the sidecar's own description (Takeout `description`, XMP `dc:description`) squeezed to one line and trimmed to 200 characters, blank when the file has no sidecar or the sidecar says nothing; the handoff stage copies it into `media.csv`'s `caption` for every selected file, and the index stage's sidecar line counts the files that carry one.
 
 `source_path` has one shape for every source: `<zip>!<member>` for a file inside a Takeout zip and `<source label>!<relative path>` for a file in a folder source, the label being the source folder's name. The index looks a file's sidecar up by that path in `index/takeout-sidecars.csv`, which ingest writes with the columns `zip` (the zip, or the source label), `member` (the sidecar's own path inside it), `title`, `folder`, `photo_taken_ts` and `creation_ts` (epoch seconds), `lat`, `lon`, `people`, `description`, `title_collision`, `media_member` (the media file the sidecar belongs to: resolved by the Takeout naming rules for a JSON sidecar and by the same folder and the same stem for an XMP one; blank when unresolved) and `source` (`takeout-zip`, `takeout-json` or `xmp`). For a folder source, ingest counts the `.xmp` sidecars that reached no file and the `.json` files too large to be read as sidecars (over 64 000 bytes) in its per-source line, and names up to eight of them one by one with the reason (`! sidecar Album/IMG_0001.xmp: matches 2 files (IMG_0001.jpg, IMG_0001.png) and no single still among them; left to neither`), so a date that reached nothing is never only a number in a total.
+
+`index/skipped-members.csv` is ingest's list of what it never took out of a Takeout zip: one row per member that is neither media nor a sidecar candidate, with the columns `zip` (the zip's own name), `member` (the path inside it), `bytes`, `extension` and `reason` (`not-media` for an extension no stage reads, `json-too-large` for a `.json` over the 64 000-byte sidecar limit). Nothing is extracted for these members and the zip is untouched, so the list is the only record that they were seen. Every real ingest writes the file, so a project whose sources hold no zip at all gets the header and no rows; that is the answer "nothing was skipped", not a failure. A dry run prints the count and the by-extension breakdown and writes nothing.
 
 ## `show.json`, the display and taste settings
 
@@ -134,7 +136,7 @@ Append-only, one line per operation, written by the apply tool:
 
 ## `replacements.csv`, the review round's return trip
 
-Columns: `replaces,new_file,companion,date,featured,notes`. A row with `replaces` set and `new_file` blank is a drop with no replacement; a row with `replaces` blank is a plain addition (the slot was already emptied). Dates accept the zero-filled forms. The apply tool validates every row, dry-runs each, then applies and logs.
+Columns: `replaces,new_file,companion,date,featured,notes`. A row with `replaces` set and `new_file` blank is a drop with no replacement; a row with `replaces` blank is a plain addition (the slot was already emptied). `new_file` and `companion` are each a path in the round folder or an absolute path, both accepted, so a sheet may carry a file's full path from wherever it lives; a path that is not there stops the row naming the path that was actually looked for. Dates accept the zero-filled forms. The apply tool validates every row, dry-runs each, then applies and logs.
 
 ## Stable IDs and write-back
 

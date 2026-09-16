@@ -3,8 +3,9 @@
 // bin/apply-replacements <folder> — run add-item for every row of <folder>/replacements.csv
 // columns: replaces, new_file, companion, date, featured, notes
 //   replaces  : filename currently in media.csv that leaves the set (blank = plain add)
-//   new_file  : file in <folder> (the still for a Live Photo); blank with replaces set = a drop, nothing added
-//   companion : the Live Photo video half in <folder>, or blank
+//   new_file  : the file to add (the still for a Live Photo): a path in <folder> or an absolute path, both are accepted;
+//               blank with replaces set = a drop, nothing added
+//   companion : the Live Photo video half, likewise a path in <folder> or an absolute path, or blank
 //   date      : YYYY-MM-DD, YYYY-MM or YYYY (blank on a drop row)
 //   featured  : yes / blank
 //   notes     : free text, ignored
@@ -58,10 +59,13 @@ rows.forEach((r, i) => {
   } else {
     if (!date) fail(n, 'date is required when new_file is set');
     if (!/^\d{4}(-\d{2}){0,2}$/.test(date)) fail(n, `date ${date} is not YYYY-MM-DD, YYYY-MM or YYYY`);
-    const fp = path.join(folder, file);
+    // resolve, not join: a sheet often carries the full path of a file that lives somewhere else, and joining that onto the
+    // round folder made a nonsense path. resolve keeps an absolute path as it is and still reads a bare name as a file in the
+    // round folder; the message names the path that was actually looked for
+    const fp = path.resolve(folder, file);
     if (!fs.existsSync(fp)) fail(n, `${fp} not found`);
     cmd.push(fp);
-    if (comp) { const cp = path.join(folder, comp); if (!fs.existsSync(cp)) fail(n, `${cp} not found`); cmd.push(cp); }
+    if (comp) { const cp = path.resolve(folder, comp); if (!fs.existsSync(cp)) fail(n, `${cp} not found`); cmd.push(cp); }
     cmd.push(date);
     if (featured) cmd.push('--featured');
     if (replaces) cmd.push('--replace', replaces);

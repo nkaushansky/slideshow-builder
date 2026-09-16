@@ -58,7 +58,7 @@ Windows:   python curate\setup.py
 macOS:     python3 curate/setup.py
 ```
 
-Setup creates a private Python environment in the folder, installs the pinned dependencies, downloads the two detection models (a person detector and a face detector, about 13 MB), on Windows downloads ffmpeg (about 170 MB), installs the browser automation the render uses (a few hundred MB), and prints a table of every tool it found with its version. It ends with either `everything found` or a `missing:` line that says what to install. Re-run it after installing anything; it skips what is already done.
+Setup creates a private Python environment in the folder, installs the pinned dependencies, on Windows downloads ffmpeg (about 170 MB), installs the browser automation the render uses (a few hundred MB), downloads the two detection models last (a person detector and a face detector, about 13 MB; one that fails to download is a warning and not the end of setup, since the rest of the pipeline runs without them), and prints a table of every tool it found with its version. It ends with either `everything found` or a `missing:` line that says what to install; VLC is listed as a note rather than as missing, because it is needed only on the machine that shows the slideshow. Re-run it after installing anything; it skips what is already done.
 
 If Windows says `python` is not recognized after installing, try `py -3 curate\setup.py`, or re-run the Python installer and tick the PATH option.
 

@@ -10,6 +10,10 @@ export keeps the original title even when it renames the member with a `(1)` suf
 sidecars in one folder can share a title; both are marked `title_collision` and the index stage
 leaves their dates to EXIF and the validate stage.
 
+A zip member that is neither media nor a readable sidecar is not extracted, and not lost either:
+`zip_members` returns it with a reason and ingest lists it in index/skipped-members.csv. The zip is
+read-only and kept, so the list is what makes those members findable again.
+
 The same sidecars turn up beside the files when a Takeout was unzipped into a folder source;
 ingest reads those with `read_sidecar_file` and runs them through `finish_rows`, the same
 collision and claim rules as the zip case. Every row says where it came from in `source`:
@@ -33,6 +37,7 @@ SIDECAR_MAX_BYTES = 64_000
 SIDECAR_COLUMNS = ["zip", "member", "title", "folder", "photo_taken_ts", "creation_ts", "lat", "lon",
                    "people", "description", "title_collision", "media_member", "source"]
 SIDECAR_SOURCES = ("takeout-zip", "takeout-json", "xmp")
+SKIPPED_COLUMNS = ["zip", "member", "bytes", "extension", "reason"]
 
 _SUPP = re.compile(r"\.supplemental-metad[a-z]*$", re.I)
 _DUP = re.compile(r"^(.*)\.([A-Za-z0-9]+)\((\d+)\)$")
@@ -42,9 +47,16 @@ def list_zips(folder: str) -> list[str]:
     return sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".zip"))
 
 
-def zip_members(zpath: str) -> tuple[list[zipfile.ZipInfo], list[zipfile.ZipInfo]]:
-    """(media members, sidecar candidates) from the central directory only."""
-    media, side = [], []
+def zip_members(zpath: str) -> tuple[list[zipfile.ZipInfo], list[zipfile.ZipInfo], list[tuple[zipfile.ZipInfo, str]]]:
+    """(media members, sidecar candidates, everything else as (member, reason)) from the central
+    directory only.
+
+    The third list is the point: a member that is neither media nor a readable sidecar (an .html
+    album page, an .aae, a .txt, a .json too large to be one) is never extracted, but it is named
+    with its reason, so the accounting can show what it never looked at instead of dropping it in
+    silence. The reasons are `not-media` and `json-too-large`.
+    """
+    media, side, skipped = [], [], []
     with zipfile.ZipFile(zpath) as zf:
         for i in zf.infolist():
             if i.is_dir():
@@ -54,7 +66,11 @@ def zip_members(zpath: str) -> tuple[list[zipfile.ZipInfo], list[zipfile.ZipInfo
                 media.append(i)
             elif ext == ".json" and i.file_size <= SIDECAR_MAX_BYTES:
                 side.append(i)
-    return media, side
+            elif ext == ".json":
+                skipped.append((i, "json-too-large"))
+            else:
+                skipped.append((i, "not-media"))
+    return media, side, skipped
 
 
 def read_sidecar(zf: zipfile.ZipFile, member: str) -> dict | None:
@@ -98,16 +114,22 @@ def sidecar_fields(d, member: str) -> dict | None:
     }
 
 
-def index_sidecars(zpaths: list[str], workers: int = 8, progress=None) -> tuple[list[dict], dict[str, list[tuple[str, int]]]]:
+def index_sidecars(zpaths: list[str], workers: int = 8, progress=None) -> tuple[list[dict], dict[str, list[tuple[str, int]]], list[dict]]:
     """Read every sidecar in every zip. Returns (sidecar rows, media members by member path ->
-    [(zip path, size)]). Rows carry title_collision and media_member resolved by member path."""
+    [(zip path, size)], skipped-member rows with SKIPPED_COLUMNS). Rows carry title_collision and
+    media_member resolved by member path. `progress` is called after each zip with that zip's name,
+    the sidecar and media counts so far, and that zip's skipped-member rows."""
     rows: list[dict] = []
     media_by_member: dict[str, list[tuple[str, int]]] = collections.defaultdict(list)
+    skipped_rows: list[dict] = []
     for zp in zpaths:
-        media, side = zip_members(zp)
+        media, side, skipped = zip_members(zp)
         for m in media:
             media_by_member[m.filename].append((zp, m.file_size))
         zname = os.path.basename(zp)
+        here = [{"zip": zname, "member": i.filename, "bytes": i.file_size,
+                 "extension": os.path.splitext(i.filename)[1].lower(), "reason": reason} for i, reason in skipped]
+        skipped_rows.extend(here)
         with zipfile.ZipFile(zp) as zf:
             with ThreadPoolExecutor(workers) as ex:
                 for r in ex.map(lambda i: read_sidecar(zf, i.filename), side):
@@ -116,12 +138,12 @@ def index_sidecars(zpaths: list[str], workers: int = 8, progress=None) -> tuple[
                         r["source"] = "takeout-zip"
                         rows.append(r)
         if progress:
-            progress(zname, len(rows), len(media_by_member))
+            progress(zname, len(rows), len(media_by_member), here)
     members_by_folder: dict[str, set[str]] = collections.defaultdict(set)
     for mp in media_by_member:
         members_by_folder[os.path.dirname(mp)].add(os.path.basename(mp))
     finish_rows(rows, members_by_folder)
-    return rows, media_by_member
+    return rows, media_by_member, skipped_rows
 
 
 def finish_rows(rows: list[dict], members_by_folder: dict[str, set[str]]) -> int:

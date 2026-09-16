@@ -5,20 +5,24 @@ beside the media in a folder source (an unzipped Takeout, an Apple Photos export
     python curate/run.py ingest [--dry-run] [--force] [--workers N]
 
 Outputs: work/<flat files>, index/ingest.csv, index/takeout-sidecars.csv (every sidecar of every
-source, `source` says which kind). Sources are never modified. The copy is a stream that hashes as
-it goes; the destination is hashed again afterwards and a row is `verified = yes` only when size
-and hash agree. Reruns skip verified rows, so a killed run is safe to restart. Basename collisions
+source, `source` says which kind), index/skipped-members.csv (every zip member that is neither media
+nor a readable sidecar, with the reason). Sources are never modified. The copy is a stream that
+hashes as it goes; the destination is hashed again afterwards and a row is `verified = yes` only
+when size and hash agree. Reruns skip verified rows, so a killed run is safe to restart. Basename collisions
 get the source path chain as a prefix, never a sequence number, so origin stays readable in the name.
 
 A sidecar is never copied as media: a .json that parses as a Takeout sidecar (photoTakenTime
 present) and every .xmp go into the sidecar index, and .aae files (Apple's edit recipes) are set
-aside; any other .json is copied like every file and cut as unsupported at select. A sidecar whose
-media file cannot be settled -- an .xmp that names no file in its folder or two of them, a .json too
-large to read as a sidecar -- is counted and named with its reason (up to SIDECAR_NAMES_SHOWN of
-them), because a date that reached nothing must not be a number in a total. ingest.csv's
-`source_path` is `<source label>!<path inside the source>` for a folder source and
-`<zip name>!<member path>` for a Takeout zip, one shape, so the index stage looks a file's sidecar
-up the same way for both.
+aside; any other .json is copied like every file and cut as unsupported at select. Inside a Takeout
+zip nothing is extracted unless it is media, so the members that are neither media nor sidecars (an
+.html album page, an .aae, a .txt, a .json over the sidecar size limit) are counted per zip and
+listed in index/skipped-members.csv; the zip is read-only and kept, so the list is what makes them
+findable. A sidecar whose media file cannot be settled -- an .xmp that names no file in its folder
+or two of them, a .json too large to read as a sidecar -- is counted and named with its reason (up
+to SIDECAR_NAMES_SHOWN of them), because a date that reached nothing must not be a number in a
+total. ingest.csv's `source_path` is `<source label>!<path inside the source>` for a folder source
+and `<zip name>!<member path>` for a Takeout zip, one shape, so the index stage looks a file's
+sidecar up the same way for both.
 """
 from __future__ import annotations
 
@@ -42,6 +46,16 @@ INGEST_COLUMNS = ["media_id", "filename", "source_kind", "source_path", "bytes",
 CHUNK = 1 << 20
 FLUSH_EVERY = 50
 SIDECAR_NAMES_SHOWN = 8       # sidecars that reached no file are named one by one, up to this many, then counted
+
+
+def skipped_summary(rows: list[dict]) -> str:
+    """'.html 12, .aae 20, .json over 64 000 bytes 2' for one zip's skipped members: what was skipped,
+    by extension, so a whole album export showing up as .html is visible on the line itself."""
+    limit = f"{_takeout.SIDECAR_MAX_BYTES:,}".replace(",", " ")
+    counts = collections.Counter(
+        (f"{r['extension']} over {limit} bytes" if r["reason"] == "json-too-large" else (r["extension"] or "(no extension)"))
+        for r in rows)
+    return ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
 
 
 def slug(s: str) -> str:
@@ -156,14 +170,21 @@ def plan_folder(src_root: Path, kind: str, source_label: str, tz) -> tuple[list[
     return items, rows, counts, lost
 
 
-def plan_takeout(src_root: Path, source_label: str, sidecar_out: Path, dry: bool) -> tuple[list[dict], list[dict]]:
+def plan_takeout(src_root: Path, source_label: str, sidecar_out: Path, dry: bool) -> tuple[list[dict], list[dict], list[dict]]:
     zips = [str(src_root)] if src_root.is_file() and src_root.suffix.lower() == ".zip" else _takeout.list_zips(str(src_root))
     if not zips:
         raise SystemExit(f"ingest: Takeout source {src_root} holds no .zip files; an unzipped Takeout is kind = \"folder\" "
                          "(its JSON sidecars beside the files are read the same way)")
     t0 = time.time()
-    rows, media_by_member = _takeout.index_sidecars(
-        zips, progress=lambda z, ns, nm: say(f"  sidecars: {z}: {ns} sidecars, {nm} media members so far"))
+
+    def progress(z, ns, nm, skipped):
+        line = f"  sidecars: {z}: {ns} sidecars, {nm} media members so far"
+        if skipped:
+            line += (f"; {len(skipped)} members skipped (not media or sidecars): {skipped_summary(skipped)}; "
+                     f"{'would be listed in' if dry else 'listed in'} index/skipped-members.csv")
+        say(line)
+
+    rows, media_by_member, skipped_rows = _takeout.index_sidecars(zips, progress=progress)
     say(f"  {len(rows)} sidecars in {len(zips)} zips, {sum(1 for r in rows if r['title_collision'])} title collisions, "
         f"{sum(1 for r in rows if r['media_member'])} resolved to a member, {time.time() - t0:.1f}s")
     items = []
@@ -176,7 +197,7 @@ def plan_takeout(src_root: Path, source_label: str, sidecar_out: Path, dry: bool
         parts = member.split("/")
         items.append(dict(kind="takeout", src=None, zip=zpath, member=member, rel=f"{zname}!{member}",
                           name=parts[-1], chain=[source_label] + parts[:-1], size=size, mtime=None))
-    return items, rows
+    return items, rows, skipped_rows
 
 
 def assign_names(items: list[dict]) -> None:
@@ -234,6 +255,7 @@ def main(argv: list[str]) -> int:
     work, index = P.work, P.index
     ingest_csv = index / "ingest.csv"
     sidecar_csv = index / "takeout-sidecars.csv"
+    skipped_csv = index / "skipped-members.csv"
 
     try:
         tz = ZoneInfo(P.timezone)   # an .xmp time without an offset is read in the project's zone
@@ -250,11 +272,13 @@ def main(argv: list[str]) -> int:
     # ---- plan
     items: list[dict] = []
     sidecar_rows: list[dict] = []
+    skipped_rows: list[dict] = []
     labels = collections.Counter(s.path.name for s in P.sources)
     for s in P.sources:
         label = s.path.name if labels[s.path.name] == 1 else f"{s.path.parent.name}-{s.path.name}"
         if s.kind == "takeout":
-            its, rows = plan_takeout(s.path, label, sidecar_csv, dry)
+            its, rows, skipped = plan_takeout(s.path, label, sidecar_csv, dry)
+            skipped_rows.extend(skipped)
         else:
             its, rows, counts, lost = plan_folder(s.path, s.kind, label, tz)
             if rows or counts:
@@ -296,6 +320,8 @@ def main(argv: list[str]) -> int:
             say(f"   {i['rel']} -> work/{i['dest']}")
         if sidecar_rows:
             say(f"   would write {sidecar_csv.name} with {len(sidecar_rows)} rows")
+        say(f"   would write {skipped_csv.name} with {len(skipped_rows)} skipped zip member(s)"
+            + (f": {skipped_summary(skipped_rows)}" if skipped_rows else ""))
         say("[dry run] nothing written")
         return 0
 
@@ -304,6 +330,9 @@ def main(argv: list[str]) -> int:
     if sidecar_rows:
         write_csv(sidecar_csv, sidecar_rows, _takeout.SIDECAR_COLUMNS)
         say(f"wrote {sidecar_csv} ({len(sidecar_rows)} rows)")
+    # always written, header and all: "nothing was skipped" is an answer the owner should be able to read
+    write_csv(skipped_csv, skipped_rows, _takeout.SKIPPED_COLUMNS)
+    say(f"wrote {skipped_csv} ({len(skipped_rows)} rows)")
 
     # ---- copy
     t0 = time.time()
