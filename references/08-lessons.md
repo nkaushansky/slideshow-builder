@@ -35,7 +35,7 @@ The first run built a whole-life slideshow for a family milestone: about 20,000 
 
 - Copy never move; quarantine never delete; verify by flags after every pass.
 - Metadata-first triage of the export: sidecars in seconds, pixels only for candidates.
-- Perceptual-hash matching of exports to originals, which recovered real dates for hundreds of files and upgraded low-resolution copies.
+- Perceptual-hash matching of exports to originals, which recovered real dates for hundreds of files and upgraded low-resolution copies. The hashes are kept and this version computes one for every still, but it spends them on pairing, bursts and diversity; matching an export back to its original to recover a date is the first run's method and is not in this version.
 - GPS as the tiebreaker for places and trips.
 - Pins: a date fix can never drop a keeper.
 - Four selection lenses with consensus as evidence; numbered sheets with drops below the line.

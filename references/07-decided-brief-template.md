@@ -24,7 +24,7 @@ Fill this into `project/BRIEF.md` after the intake and Step 0, before any buildi
 - <Python, Node, ffmpeg, Chrome, VLC: versions, paths, how installed>
 - <timezone and display resolution as Step 0 detected them, and whether `--apply` wrote them or the intake answered>
 - <Playwright: `[tools] chrome`, bundled browser or installed Chrome via channel>
-- <screenshot cost measured at the output resolution; sleep settings; keep-awake command>
+- <sleep settings, and the keep-awake in use: `curate/run.py` holds one for the length of a stage, and the build wrappers do the same for the build commands, `caffeinate` on macOS and `keepawake.ps1` through the `.cmd` wrappers on Windows; Step 0 does not measure screenshot cost in this version, so take it from the 60-second test render>
 - <anything that failed and the fallback taken>
 
 ## Inputs
@@ -42,7 +42,7 @@ Fill this into `project/BRIEF.md` after the intake and Step 0, before any buildi
 | 3 | Large tiles | `[taste] mixed_tiles` <yes: featured stills plus every video, no full-screen singles; no: none, every row a base row> | heroes; promotion of videos; a flat grid | owner | |
 | 4 | Live Photos | `[taste] live_photos` <clip: full clip, hold, no bounce, autoplay as the tile; still: the still alone> | trim and ping-pong; still with hover | owner | |
 | 5 | Videos | included (`[taste] include_videos`, `include_gifs`), feature rows, silent, scroll through, per-file start; slow motion <slow or realtime> | full screen; paused scroll; stills only | owner | |
-| 6 | Captions | `[taste] captions` <none; date, each tile's date at its own precision; text, the `caption` column of `media.csv`, edited by the owner before the build> | the other two; baked into the tiles | owner | |
+| 6 | Captions | `[taste] captions` <none; date, each tile's date at its own precision; text, the `caption` column of `media.csv`, edited by the owner before the build>; drawn on the page in the live player and painted into the rendered frames, so they are in the video too | the other two; baked into the tiles | owner | |
 | 7 | Audio | <none, or `[audio]`: the files in play order, loop <on or off>, crossfade <s> s, fade <s> s, volume <v>, muxed onto the render> | the DJ's sound; ambient in the quiet window | owner | |
 | 8 | Output | `[output]`: <resolution> at <fps> fps, quality <final or draft>, ×<concat_copies> concat; `[machines] player` <vlc, tv-usb or browser> | live browser | build | |
 | 9 | Loop length | an output of the cap; expected <N> min at <speed> px/s (`[taste] scroll_speed`, 0 = the first run's pace scaled to `[output]` height) with <tile_size> tiles | a fixed target | build | |

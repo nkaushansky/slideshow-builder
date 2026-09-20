@@ -593,7 +593,7 @@ def report(py: Path, project: Path | None, detected: dict[str, str] | None = Non
         got = have.get(name.lower().replace("_", "-"), "")
         rows.append((name, got or "MISSING", "" if got == want else f"pinned {want}"))
     node = shutil.which("node")
-    rows.append(("node", first_line([node, "--version"]) if node else "MISSING", node or "install Node 24 LTS"))
+    rows.append(("node", first_line([node, "--version"]) if node else "MISSING", node or "install Node.js 20 or newer; the current LTS is the easy choice"))
     npm = shutil.which("npm") or shutil.which("npm.cmd")
     rows.append(("npm", first_line([npm, "--version"]) if npm else "MISSING", npm or ""))
     pw = REPO / "build" / "node_modules" / "playwright" / "package.json"

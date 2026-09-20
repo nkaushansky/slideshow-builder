@@ -33,7 +33,7 @@ About one in six of the stills, chosen by a quality score and then reviewed on o
 
 ## Theme presets
 
-A theme is a query that builds the pool plus a reweighting of the lenses. Presets to start from:
+A theme is a query that builds the pool plus a reweighting of the lenses, which is not in this version: nothing reads `[show] theme`, the pool comes from the scope dates and the people gate alone, and no lens is reweighted by a theme. A theme is set by hand instead, with the scope dates, `[selection] period` (`month` for a trip or a weekend), `[show] must_include` and `off_limits`, the cap, and `[selection.weights]` and `[selection.featured]` when the sheets show a reason. The presets below are what to aim those knobs at, not switches to turn on: the pool column says what the scope and the lists should end up holding, the lens column what the weights should favor.
 
 | Theme | Pool | Lens changes |
 |---|---|---|

@@ -13,11 +13,11 @@ The intake exists because the first run learned most of these facts late, and ea
    Why: on the first run a second phone's photos carried the same camera counters as the first, and a set of print exports had lost every timestamp. Knowing this up front turns a forensics phase into a plan. Scans and prints that sit in folders named by year (`1998 Florida/`) can be dated from the folder with `[priors] folder_year_rule = true` (precision year, witness named); off by default, like the other `[priors]`.
 
 ### Machines
-4. **Build machine:** OS and version, chip, memory, free disk.
-   Why: an older Mac on an old OS cost most of a day of toolchain work on the first run; the brief had not asked.
+4. **Build machine:** will the build run on this machine, or on another one? [this machine; Step 0 reads its OS and version, chip, memory and free disk]
+   Why: an older Mac on an old OS cost most of a day of toolchain work on the first run, so these facts have to be on the table before the brief is written. Step 0 collects them itself, and the one thing it cannot know is that the build belongs on a different machine.
 5. **Display machine, if different:** OS, screen size and resolution, how it will play: VLC on a computer, a TV playing from a USB stick, or a browser. [the build machine, VLC; Step 0 detects its display]
    Why: the output resolution, the encoder settings and the launcher depend on it. A 5K panel is driven at its logical resolution, not its physical one. The answer lands in `[output] resolution` and `[output] fps` and in `[machines] player` (`vlc`, `tv-usb` or `browser`) in `config.toml`; `tv-usb` makes the render pick the H.264 level a TV stick decodes and warn about files of 4 GiB and over, which FAT32 sticks refuse; `browser` has kiosk launchers of its own; when the display is the build machine, leave the resolution blank and Step 0 writes what it detects.
-6. **Tools installed?** Python, Node, ffmpeg, Chrome. [Detect; ask only what cannot be detected]
+6. **Anything already known about the tools?** [Step 0 detects Python, Node, ffmpeg, ffprobe, Chrome and VLC with their versions; answer only if something is known to be missing, or installed somewhere unusual]
 
 ### The show
 7. **Event, date, hard stop.** [hard stop two days before the event]
@@ -30,16 +30,16 @@ The intake exists because the first run learned most of these facts late, and ea
    Why: the soundtrack is muxed onto the final file, so it plays wherever the file plays and the room's owner decides once. The launchers do not mute anything: a silent file makes no sound, and the venue's volume is set by hand.
 
 ### The people
-11. **Who is it about, and who counts as family for the selection?** Names and relationships, spelled as the photo app spells them (a one-word name such as `Sam` also matches a tag such as `Sam Jones`). A show with no people requirement (a place, a trip's scenery) sets the people gate to `none`.
-    Why: the first run's people gate was "any human in frame", and one photo of an unrelated adult made the cut. The selection needs an identity, not a presence. `[family] names` is what the export's people tags are matched against; `[family] gate` is `none`, `people` or `family`; the select stage prints which one ran.
-12. **Seed photos or tags.** 5 to 20 clear photos of each family member, or people tags in the export (a Google Takeout carries them; an Apple export does with "Export IPTC as XMP" ticked). [both]
-    Why: the tags feed the family gate (`[family] gate = "family"`) through `identify --tags-only`, without the detection models; the plain `identify` (the models from Step 0) is the one to run whenever they are installed, since only it fills the person count and person area that the `people` gate, the v4 score and the featured gate use, and select refuses `gate = "people"` on a tags-only `people.csv`. The seed photos are recorded for the face-matching milestone.
+11. **Who is it about, and who counts as family for the selection?** Names and relationships, spelled as the photo app spells them (a one-word name such as `Sam` also matches a tag such as `Sam Jones`). A show with no people requirement (a place, a trip's scenery) sets the people gate to `none`. For one honoree, the birth year and month too.
+    Why: the first run's people gate was "any human in frame", and one photo of an unrelated adult made the cut. The selection needs an identity, not a presence. `[family] names` is what the export's people tags are matched against; `[family] gate` is `none`, `people` or `family`; the select stage prints which one ran. The birth year and month go to `[honoree] birth_year` and `birth_month`: the whole-life default in question 13 has no first year without the year, and cannot pro-rate the first year's cap without the month. The name also heads the contact sheets, with the age label for the year.
+12. **People tags in the export.** A Google Takeout carries them; an Apple export does with "Export IPTC as XMP" ticked. [yes, when the export has them]
+    Why: face matching from seed photos is not built in this version, so do not ask the owner to gather photos of each person now. The family gate (`[family] gate = "family"`) reads `family_present` in `people.csv`, which identify fills by matching the export's people tags against `[family] names`: `identify --tags-only` does that without the detection models, and the detection run fills the same column while also filling the person count and person area that the `people` gate, the v4 score and the featured gate use, so the plain `identify` is the one to run whenever the models from Step 0 are installed. Select refuses `gate = "people"` on a tags-only `people.csv` and names the choices, and with no tags anywhere the remaining fallback is presence (`--allow-presence-gate`, any person in frame), which needs the detection run. If the owner already has 5 to 20 clear photos of each person, they can be set aside: `[family] seed_photos` records where they are for the face-matching milestone and nothing reads it yet.
 
 ### Scope and theme
 13. **Years or dates.** [the honoree's whole life, or the whole export]
     Why: dates go to `[show] scope_start` and `scope_end`, which set the first and last year and pro-rate their caps from their months; whole years go to `first_year` and `last_year`; with neither, the honoree's birth year and the event year stand in, and a config with none of them stops the stages with the three keys named.
 14. **Whole-life show or a theme?** A trip, a sport, a tradition, a place, a group. [whole life]
-    Why: a theme changes the candidate pool and the lens weights (see `04-selection-lenses.md`).
+    Why: a theme is done by hand in this version. `[show] theme` is recorded and nothing reads it, and no lens reweighting exists, so a theme is made of the scope dates in question 13, `[selection] period` (`month` for a trip, where a year's cap would seat one week), the must-include and off-limits lists in question 15, and the cap in question 16. The presets in `04-selection-lenses.md` are what to aim those knobs at, not switches to turn on.
 15. **Must-include and off-limits.** [none; off-limits is the family's call, and the skill never decides it]
     Either list takes filenames, media ids, or a folder of photos (every file in it). Off-limits files are excluded by select (cut with reason `off-limits`, before any other test) and refused by the apply tool; must-include files are seated like pins, with a warning for any that is not among the candidates.
 16. **How many moments, or let it fall out?** [derived from the loop length target (`[show] loop_minutes_target`, 15 minutes) and the tile size, pro-rated for partial periods; or a cap per period in `[selection] cap_per_year`, with `[selection.cap_overrides]` for single years] And what should the cap count in: years, quarters or months? [year] Any undated files worth seating? [none]
@@ -59,7 +59,7 @@ The intake exists because the first run learned most of these facts late, and ea
 22. **Owner hours available** for sheets and watching. [3 to 4 hours total]
     Why: drives the number of sheets and the number of review rounds.
 23. **Working folder and cleanup.** Where derived copies live and what to delete afterwards. [beside the export; delete derived copies after the event, keep the index, the change log and the final video]
-24. **Consent.** Confirm that nothing leaves the machine and that the owner is entitled to use these photos for this purpose. Do not upload photos to any service.
+24. **Consent.** Confirm that the owner is entitled to use these photos for this purpose, and say what stays and what does not: the photos and videos never leave the machine, while what Claude reads while it works (file names, dates, places, people tags, captions, the intake answers and the stages' output) goes to Anthropic like any other Claude conversation. Do not upload photos to any service.
 
 ## Detect, do not ask
 
