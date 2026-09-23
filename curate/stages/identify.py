@@ -392,6 +392,15 @@ def main(argv: list[str]) -> int:
         write_people(people_path, ordered_rows(items, done))
         say(f"nothing to do; {people_path} rewritten in index order")
         return 0
+    try:   # optional packages (curate/requirements-detection.txt): some machines have no build of them
+        import cv2  # noqa: F401
+        import onnxruntime  # noqa: F401
+    except ImportError as e:
+        say(f"identify: the detection packages are not installed here ({e.name or e} is missing). Setup installs "
+            "curate/requirements-detection.txt where this machine has a build of it, which is not every Intel Mac nor "
+            "macOS before 14. Without them, `python curate/run.py identify --tags-only` fills the family gate from the "
+            "export's people tags, or [family] gate = \"none\" skips the people check.")
+        return 2
 
     det = Detectors(P)
     say(f"  person detector: {det.person_file.name} ({det.person_entry.get('license', '?')}), input {det.size}, class {det.cls}")

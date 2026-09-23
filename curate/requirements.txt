@@ -1,10 +1,13 @@
-# Curation dependencies, pinned to the versions the port was tested with (Python 3.11+; tested on 3.13).
+# Curation dependencies, pinned to the versions the port was tested with (Python 3.11+; tested on 3.11 and 3.13).
 # Install with `python curate/setup.py`, or by hand: python -m venv .venv && .venv/Scripts/pip install -r curate/requirements.txt
+# The core: every stage runs on these alone, on Windows, Linux, and macOS 10.15 or later on Intel (12 or later on Apple
+# Silicon). scipy and PyWavelets come with ImageHash and are pinned too, so a later release that drops a platform's
+# builds cannot break the install there. The detection packages are optional: curate/requirements-detection.txt.
 Pillow==12.3.0
 pillow-heif==1.7.0
 numpy==2.4.6
 ImageHash==4.3.2
-opencv-python-headless==5.0.0.93
-onnxruntime==1.29.0
+scipy==1.17.1
+PyWavelets==1.9.0
 tzdata==2026.3
 tzlocal==5.3.1

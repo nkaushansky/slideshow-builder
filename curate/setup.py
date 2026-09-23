@@ -5,14 +5,20 @@
 Plain script, no setuptools. What it does, in order:
 
 1. Creates a virtual environment at <repo>/.venv (or --venv) if there is none, and installs
-   curate/requirements.txt into it with pip. Then detects what Step 0 of the intake would
-   otherwise ask: the machine's IANA timezone (tzlocal in the venv, else TZ, /etc/localtime,
-   /etc/timezone) and the logical resolution of its screen (GetSystemMetrics on Windows,
-   system_profiler on macOS, xrandr on Linux). With --project --apply the detected values are
-   written into config.toml where it is blank ([project] timezone when missing, blank or "UTC";
+   curate/requirements.txt into it with pip: the core, which every stage needs, so a failure stops
+   setup and names the package that has no build for this machine. Then it installs
+   curate/requirements-detection.txt, the person and face detection identify's detection run uses;
+   that one is optional, because some machines have no build of it (every Intel Mac, and macOS
+   before 14), and a failure is reported and setup carries on. Then detects what Step 0 of the
+   intake would otherwise ask: the machine's IANA timezone (tzlocal in the venv, else TZ,
+   /etc/localtime, /etc/timezone) and the logical resolution of its screen (GetSystemMetrics on
+   Windows, system_profiler on macOS, xrandr on Linux). With --project --apply the detected values
+   are written into config.toml where it is blank ([project] timezone when missing, blank or "UTC";
    [output] resolution; [machines] build_os); without --apply the lines to paste are printed.
 2. Fetches the default models into curate/models/ (gitignored) unless the project's config.toml
-   points [models] at user-supplied files or --skip-models is given:
+   points [models] at user-supplied files or --skip-models is given, and only when the detection
+   packages are installed, since nothing else runs them. A failed download or export is reported,
+   not fatal: the models serve the detection run alone.
      - YuNet face detector from the OpenCV Zoo (Apache-2.0).
      - YOLOv8n person detector: downloads yolov8n.pt from the Ultralytics release assets and exports
        it to ONNX with the `ultralytics` package in a throwaway environment in the system temp folder,
@@ -50,6 +56,7 @@ REPO = HERE.parent
 MODELS = HERE / "models"
 MANIFEST = MODELS / "manifest.json"
 REQUIREMENTS = HERE / "requirements.txt"
+REQUIREMENTS_DETECTION = HERE / "requirements-detection.txt"   # optional: identify's detection run
 TOOLS_FFMPEG = REPO / "tools" / "ffmpeg"
 
 sys.path.insert(0, str(HERE))
@@ -137,11 +144,48 @@ def ensure_venv(venv: Path, install: bool) -> Path:
         r = run([str(py), "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
         r = run([str(py), "-m", "pip", "install", "--quiet", "-r", str(REQUIREMENTS)])
         if r.returncode != 0:
-            raise SystemExit(f"setup: pip install failed. It ran with Python {sys.version} ({sys.executable}); "
-                             f"the pins in {REQUIREMENTS.name} need Python 3.11 or newer, so a 'No matching distribution' "
-                             f"here usually means an older interpreter.\n{r.stderr[-2000:]}")
+            raise SystemExit(f"setup: installing {REQUIREMENTS.name} failed: {pip_failure(r.stderr)}. Every stage needs these "
+                             f"packages; the header of {REQUIREMENTS.name} says which machines they build for.\n{r.stderr[-2000:]}")
         say("  installed")
     return py
+
+
+def machine() -> str:
+    """'macOS 13.6, x86_64, Python 3.12.4': what a missing build is missing for."""
+    return f"{build_os_name()}, {platform.machine()}, Python {platform.python_version()}"
+
+
+_NO_BUILD = re.compile(r"(?:No matching distribution found for|Could not find a version that satisfies the requirement) (\S+)")
+
+
+def pip_failure(stderr: str) -> str:
+    """What a failed pip install could not get, in words: the requirement with no build for this machine when pip says
+    so, else pip's last error line. The version of Python is only named as the cause when it is."""
+    m = _NO_BUILD.search(stderr or "")
+    if m:
+        return f"{m.group(1)} has no build for this machine ({machine()})"
+    lines = [ln.strip() for ln in (stderr or "").strip().splitlines() if ln.strip()]
+    return lines[-1] if lines else "pip gave no reason"
+
+
+def install_detection(py: Path) -> None:
+    """Install requirements-detection.txt. Never fatal: without these packages every stage still runs, and identify
+    --tags-only still fills the family gate from the export's people tags."""
+    say(f"installing {REQUIREMENTS_DETECTION.name} (optional: the person and face detection identify can run)")
+    r = run([str(py), "-m", "pip", "install", "--quiet", "-r", str(REQUIREMENTS_DETECTION)])
+    if r.returncode == 0:
+        say("  installed")
+        return
+    say(f"  ! not installed: {pip_failure(r.stderr)}")
+    say("    Every stage still runs. identify --tags-only still reads the export's people tags for the family gate; the")
+    say("    detection run (the \"people\" gate, person counts and person area) is not available on this machine.")
+
+
+def detection_missing(py: Path) -> str:
+    """'' when the venv can import the detection packages, else what is missing, in words."""
+    if _py_output(py, "import cv2, onnxruntime; print('ok')") == "ok":
+        return ""
+    return f"the detection packages ({REQUIREMENTS_DETECTION.name}) are not installed"
 
 
 # ---------------------------------------------------------------- 1b. what Step 0 detects
@@ -392,22 +436,35 @@ def record_user_model(m: dict, name: str, purpose: str, path: str) -> None:
     say(f"  recorded user-supplied {purpose} model {p}")
 
 
-def setup_models(project: Path | None, skip: bool) -> None:
+def setup_models(project: Path | None, skip: bool, detection: str = "") -> None:
+    """Record user-supplied models and fetch the defaults. `detection` is why the detection packages are missing ('' when
+    they are installed): then nothing could run the models, so none is fetched. A default that fails to download or
+    export is reported and skipped, never fatal: the models serve identify's detection run alone."""
     say("models")
+    if detection:
+        say(f"  not fetched: {detection}, so nothing here could run them; identify --tags-only needs none")
+        return
     m = load_manifest()
     supplied = project_models(project)
+
+    def fetch(fn, label: str) -> None:
+        try:
+            fn(m)
+        except (SystemExit, Exception) as e:  # a download, an export or a throwaway environment that failed
+            say(f"  ! {label} not fetched: {str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__}")
+            say("    identify's detection run needs it; identify --tags-only does not. Re-run setup to try again.")
     if supplied["person_detector"]:
         record_user_model(m, "user-person-detector", "person detection", supplied["person_detector"])
     elif skip:
         say("  --skip-models: YOLOv8n not fetched (identify will refuse to run until it is listed in the manifest)")
     else:
-        export_yolo(m)
+        fetch(export_yolo, "YOLOv8n")
     if supplied["face_detector"]:
         record_user_model(m, "user-face-detector", "face detection", supplied["face_detector"])
     elif skip:
         say("  --skip-models: YuNet not fetched")
     else:
-        fetch_yunet(m)
+        fetch(fetch_yunet, "YuNet")
     save_manifest(m)
     say(f"  manifest: {MANIFEST} ({len(m['models'])} model(s))")
 
@@ -506,13 +563,17 @@ def pip_versions(py: Path) -> dict[str, str]:
         return {}
 
 
-def pinned() -> list[tuple[str, str]]:
+def pinned() -> list[tuple[str, str, bool]]:
+    """(package, pinned version, optional) from requirements.txt, then the optional requirements-detection.txt."""
     out = []
-    for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "==" in line:
-            n, v = line.split("==", 1)
-            out.append((n.strip(), v.strip()))
+    for path, optional in ((REQUIREMENTS, False), (REQUIREMENTS_DETECTION, True)):
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line and "==" in line:
+                n, v = line.split("==", 1)
+                out.append((n.strip(), v.strip(), optional))
     return out
 
 
@@ -532,9 +593,14 @@ def report(py: Path, project: Path | None, detected: dict[str, str] | None = Non
         pass
     rows.append(("python (venv)", first_line([str(py), "--version"]).replace("Python ", ""), str(py)))
     have = pip_versions(py)
-    for name, want in pinned():
+    for name, want, optional in pinned():
         got = have.get(name.lower().replace("_", "-"), "")
-        rows.append((name, got or "MISSING", "" if got == want else f"pinned {want}"))
+        if got:
+            rows.append((name, got, "" if got == want else f"pinned {want}"))
+        elif optional:   # not in the "missing" line: setup can finish without it, and identify --tags-only still runs
+            rows.append((name, "not installed", f"optional, for identify's detection run (pinned {want}, {REQUIREMENTS_DETECTION.name})"))
+        else:
+            rows.append((name, "MISSING", f"pinned {want}"))
     node = shutil.which("node")
     rows.append(("node", first_line([node, "--version"]) if node else "MISSING", node or "install Node 24 LTS"))
     npm = shutil.which("npm") or shutil.which("npm.cmd")
@@ -647,9 +713,12 @@ def main(argv: list[str]) -> int:
 
     say("environment")
     py = ensure_venv(Path(a.venv).expanduser().resolve(), install=not a.no_install)
+    if not a.no_install:
+        install_detection(py)
+    detection = detection_missing(py)
     detected = detect_all(py)
     say(f"  timezone {detected['timezone'] or 'not detected'}; display {detected['display'] or 'not detected'}; build OS {detected['build_os']}")
-    setup_models(project, a.skip_models)
+    setup_models(project, a.skip_models, detection)
     if WIN and not a.no_install and not a.skip_ffmpeg:
         have = find_tool("ffmpeg", project) and find_tool("ffprobe", project)
         if a.fetch_ffmpeg or not have:
@@ -674,6 +743,8 @@ def main(argv: list[str]) -> int:
         marks = [m for m in SYNCED_MARKERS if m in str(project).lower()]
         if marks:
             say(f"  ! the project folder looks like it is on a synced drive ({', '.join(marks)}); prefer a plain local folder")
+    if detection:
+        say(f"  note: {detection}; on this machine identify runs as identify --tags-only, and every other stage runs as usual")
     if missing:
         say(f"missing: {', '.join(missing)}")
     else:

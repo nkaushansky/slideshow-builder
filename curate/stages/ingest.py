@@ -13,9 +13,10 @@ get the source path chain as a prefix, never a sequence number, so origin stays 
 A sidecar is never copied as media: a .json that parses as a Takeout sidecar (photoTakenTime
 present) and every .xmp go into the sidecar index, and .aae files (Apple's edit recipes) are set
 aside; any other .json is copied like every file and cut as unsupported at select. A sidecar whose
-media file cannot be settled -- an .xmp that names no file in its folder or two of them, a .json too
-large to read as a sidecar -- is counted and named with its reason (up to SIDECAR_NAMES_SHOWN of
-them), because a date that reached nothing must not be a number in a total. ingest.csv's
+media file cannot be settled -- an .xmp that names no file in its folder or two of them, a JSON
+sidecar (in a zip or beside the files) that names no file or claims one another sidecar claims too,
+a .json too large to read as a sidecar -- is counted and named with its reason (up to
+SIDECAR_NAMES_SHOWN of them), because a date that reached nothing must not be a number in a total. ingest.csv's
 `source_path` is `<source label>!<path inside the source>` for a folder source and
 `<zip name>!<member path>` for a Takeout zip, one shape, so the index stage looks a file's sidecar
 up the same way for both.
@@ -153,7 +154,16 @@ def plan_folder(src_root: Path, kind: str, source_label: str, tz) -> tuple[list[
                     counts["xmp_unresolved"] += 1
                     lost.append(f"sidecar {r['member']}: {_xmp.unresolved_reason(r['member'], names)}")
         counts["ambiguous"] = _takeout.finish_rows(rows, members_by_folder)
+        lost += _takeout.unresolved_lines(rows)      # JSON sidecars that named no file, and any claim two sidecars made
     return items, rows, counts, lost
+
+
+def say_lost(lost: list[str]) -> None:
+    """Name the sidecars that reached no file, up to SIDECAR_NAMES_SHOWN of them, then count the rest."""
+    for line in lost[:SIDECAR_NAMES_SHOWN]:
+        say(f"  ! {line}")
+    if len(lost) > SIDECAR_NAMES_SHOWN:
+        say(f"  ! ... and {len(lost) - SIDECAR_NAMES_SHOWN} more sidecar(s) that reached no file")
 
 
 def plan_takeout(src_root: Path, source_label: str, sidecar_out: Path, dry: bool) -> tuple[list[dict], list[dict]]:
@@ -164,8 +174,10 @@ def plan_takeout(src_root: Path, source_label: str, sidecar_out: Path, dry: bool
     t0 = time.time()
     rows, media_by_member = _takeout.index_sidecars(
         zips, progress=lambda z, ns, nm: say(f"  sidecars: {z}: {ns} sidecars, {nm} media members so far"))
+    lost = _takeout.unresolved_lines(rows)
     say(f"  {len(rows)} sidecars in {len(zips)} zips, {sum(1 for r in rows if r['title_collision'])} title collisions, "
-        f"{sum(1 for r in rows if r['media_member'])} resolved to a member, {time.time() - t0:.1f}s")
+        f"{sum(1 for r in rows if r['media_member'])} resolved to a member, {len(lost)} reached no file, {time.time() - t0:.1f}s")
+    say_lost(lost)
     items = []
     for member in sorted(media_by_member):
         copies = media_by_member[member]
@@ -263,10 +275,7 @@ def main(argv: list[str]) -> int:
                     f"{sum(1 for r in rows if r['title_collision'])} title collisions, {counts['ambiguous']} files claimed twice (left unresolved); "
                     f"{counts['aae']} .aae files skipped, {counts['xmp_unreadable']} .xmp files unreadable, "
                     f"{counts['xmp_unresolved']} .xmp files reached no media file, {counts['json_oversize']} .json files too large to read")
-            for line in lost[:SIDECAR_NAMES_SHOWN]:     # a lost date is named, never only counted
-                say(f"  ! {line}")
-            if len(lost) > SIDECAR_NAMES_SHOWN:
-                say(f"  ! ... and {len(lost) - SIDECAR_NAMES_SHOWN} more sidecar(s) that reached no file")
+            say_lost(lost)                               # a lost date is named, never only counted
         sidecar_rows.extend(rows)
         say(f"  {len(its)} files, {sum(i['size'] for i in its) / 1e9:.2f} GB in {s.path.name}")
         items.extend(its)

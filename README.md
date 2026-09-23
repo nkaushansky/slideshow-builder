@@ -58,7 +58,7 @@ Windows:   python curate\setup.py
 macOS:     python3 curate/setup.py
 ```
 
-Setup creates a private Python environment in the folder, installs the pinned dependencies, downloads the two detection models (a person detector and a face detector, about 13 MB), on Windows downloads ffmpeg (about 170 MB), installs the browser automation the render uses (a few hundred MB), and prints a table of every tool it found with its version. It ends with either `everything found` or a `missing:` line that says what to install. Re-run it after installing anything; it skips what is already done.
+Setup creates a private Python environment in the folder, installs the pinned dependencies, downloads the two detection models (a person detector and a face detector, about 13 MB), on Windows downloads ffmpeg (about 170 MB), installs the browser automation the render uses (a few hundred MB), and prints a table of every tool it found with its version. It ends with either `everything found` or a `missing:` line that says what to install. The detection packages are optional: on an Intel Mac, or a Mac older than macOS 14, setup says it skipped them and the rest installs as usual (the Python side needs macOS 10.15 or later on Intel, 12 or later on Apple Silicon), with the people in each photo read from the names your export carries (Google Takeout does; an Apple export does with "Export IPTC as XMP" ticked). Re-run it after installing anything; it skips what is already done.
 
 If Windows says `python` is not recognized after installing, try `py -3 curate\setup.py`, or re-run the Python installer and tick the PATH option.
 

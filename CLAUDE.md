@@ -15,6 +15,7 @@ A Claude skill, with its scripts and references, that builds a looping photo-mos
 - **If a stage script is missing or breaks on this machine, implement or repair it from the references.** `references/01-stages.md` and `references/04-selection-lenses.md` are complete enough to rebuild any stage. Keep the contracts in `references/02-index-contract.md` exact, because the build side depends on them.
 - **Write the decided brief and keep its changelog.** Before building, fill `references/07-decided-brief-template.md` into the project folder from the intake and the environment check. Every later decision gets a dated line there, with what it superseded.
 - **Dry-run before mutating.** Every mutating command has a dry-run mode. Use it.
+- **Run the suite around any change to the code.** `tests/` is the regression suite: `.venv/bin/python -m unittest discover -s tests` (`.venv\Scripts\python` on Windows; `tests/README.md` has the rest). Run it before and after changing `curate/` or `build/`, and add the test that would have caught a bug in the change that fixes it. It builds its projects in temporary folders and never writes into the repository. An expected failure is an open finding; when a change makes one pass, the suite fails until its decorator comes off.
 
 ## Layout
 
@@ -32,4 +33,5 @@ references/08-lessons.md                    what went wrong on the first run, an
 references/09-runbook.md                    day-of checklist, backups, after the event
 curate/                                     Python stages
 build/                                      JavaScript build, player, render
+tests/                                      the regression suite; see tests/README.md
 ```

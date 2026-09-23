@@ -2,8 +2,10 @@
 
 A Takeout is a set of zips. Each media member (`.../Photos from 2023/IMG_0001.HEIC`) has a JSON
 sidecar next to it (`IMG_0001.HEIC.json`, or the newer `IMG_0001.HEIC.supplemental-metadata.json`,
-sometimes truncated) with photoTakenTime, geoData and people tags. The sidecars index in seconds
-from the zips' central directories and small reads; nothing is extracted to do it.
+sometimes truncated) with photoTakenTime, geoData and people tags. A second file with the same title
+in one folder is `IMG_0001(1).HEIC`, its sidecar `IMG_0001.HEIC(1).json` or, in newer exports,
+`IMG_0001.HEIC.supplemental-metadata(1).json`. The sidecars index in seconds from the zips' central
+directories and small reads; nothing is extracted to do it.
 
 Rules from references/03 gate 5: key by member path, never by the `title` inside the sidecar. An
 export keeps the original title even when it renames the member with a `(1)` suffix, so two
@@ -34,8 +36,8 @@ SIDECAR_COLUMNS = ["zip", "member", "title", "folder", "photo_taken_ts", "creati
                    "people", "description", "title_collision", "media_member", "source"]
 SIDECAR_SOURCES = ("takeout-zip", "takeout-json", "xmp")
 
-_SUPP = re.compile(r"\.supplemental-metad[a-z]*$", re.I)
-_DUP = re.compile(r"^(.*)\.([A-Za-z0-9]+)\((\d+)\)$")
+_SUPP_WORD = "supplemental-metadata"        # the sidecar suffix since 2024, cut short when a name passes Takeout's limit
+_COUNTER = re.compile(r"^(.*)\((\d+)\)$")    # the "(1)" a second file with the same title gets, last in its sidecar's name
 
 
 def list_zips(folder: str) -> list[str]:
@@ -128,7 +130,9 @@ def finish_rows(rows: list[dict], members_by_folder: dict[str, set[str]]) -> int
     """Mark title collisions (same folder, same title) and settle each row's `media_member`: a row
     that already carries one (an .xmp, resolved by its own naming) keeps it, the rest resolve by
     the Takeout names. A file claimed by two sidecars is ambiguous and left to neither; the
-    number of such files is returned so the caller can say so."""
+    number of such files is returned so the caller can say so. Every sidecar this leaves without a
+    file gets `unresolved`, the reason in words, which unresolved_lines() turns into the ingest log's
+    named lines (an .xmp that matched nothing is named by the folder planner, with its own reason)."""
     by_title = collections.Counter((r["folder"], r["title"]) for r in rows if r["title"])
     for r in rows:
         r["title_collision"] = "yes" if by_title[(r["folder"], r["title"])] > 1 else ""
@@ -136,41 +140,74 @@ def finish_rows(rows: list[dict], members_by_folder: dict[str, set[str]]) -> int
     for r in rows:
         if "media_member" not in r:
             r["media_member"] = resolve_media_member(r["member"], members_by_folder.get(r["folder"], set()))
+            if not r["media_member"]:
+                r["unresolved"] = f"names no media file in {r['folder'] or 'the top folder'}"
         if r["media_member"]:
             claims[r["media_member"]].append(r)
     ambiguous = 0
     for mm, rs in claims.items():
         if len(rs) > 1:  # two sidecars claim one file: ambiguous, no automatic decision
             for r in rs:
+                others = ", ".join(o["member"] for o in rs if o is not r)
+                r["unresolved"] = f"claims {os.path.basename(mm)} along with another sidecar ({others}); left to neither"
                 r["media_member"] = ""
             ambiguous += 1
     return ambiguous
 
 
+def unresolved_lines(rows: list[dict]) -> list[str]:
+    """One line per sidecar finish_rows left without a file, with its reason, for ingest to name."""
+    return [f"sidecar {r['member']}: {r['unresolved']}" for r in rows if not r.get("media_member") and r.get("unresolved")]
+
+
+def _title_and_counter(name: str) -> tuple[str, str]:
+    """The media title a sidecar's name (without `.json`) describes, and its duplicate counter ('' when none).
+
+    Takeout names the sidecar of `IMG_0001.HEIC` `IMG_0001.HEIC.json`, or since 2024
+    `IMG_0001.HEIC.supplemental-metadata.json`, the suffix cut short (`.supplemental-metad`, `.suppl`, ...)
+    when the whole name would pass its length limit. A second file with the same title in one folder
+    becomes `IMG_0001(1).HEIC`, and its sidecar carries the counter after everything else:
+    `IMG_0001.HEIC(1).json`, or `IMG_0001.HEIC.supplemental-metadata(1).json`. The suffix is only taken
+    off when what is left ends in a media extension, so no other name loses a part.
+    """
+    counter = ""
+    m = _COUNTER.match(name)
+    if m:
+        name, counter = m.group(1), m.group(2)
+    head, dot, tail = name.rpartition(".")
+    if dot and tail and _SUPP_WORD.startswith(tail.lower()) and os.path.splitext(head)[1].lower() in MEDIA_EXT:
+        name = head
+    return name, counter
+
+
 def resolve_media_member(sidecar_member: str, names_in_folder: set[str]) -> str:
     """Member path of the media file a sidecar describes, or '' when not unambiguous.
 
-    Handles `X.HEIC.json`, `X.HEIC.supplemental-metadata.json` (also truncated), `X.HEIC(1).json`
-    for `X(1).HEIC`, and Takeout's 51-character name truncation by unique prefix match.
+    Handles `X.HEIC.json`, `X.HEIC.supplemental-metadata.json` (also cut short), the duplicate
+    counter in both namings (`X.HEIC(1).json` and `X.HEIC.supplemental-metadata(1).json` describe
+    `X(1).HEIC`), and the older exports' 51-character name truncation by unique prefix match. A
+    sidecar with a counter only ever reaches a file that carries that counter: falling back to the
+    original `X.HEIC` is how two sidecars once claimed one photo and both were thrown away.
     """
     folder = os.path.dirname(sidecar_member)
     base = os.path.basename(sidecar_member)
     if not base.lower().endswith(".json"):
         return ""
-    base = base[:-5]
-    base = _SUPP.sub("", base)
+    title, counter = _title_and_counter(base[:-5])
     join = (lambda n: f"{folder}/{n}" if folder else n)
-    if base in names_in_folder:
-        return join(base)
-    m = _DUP.match(base)
-    if m:
-        cand = f"{m.group(1)}({m.group(3)}).{m.group(2)}"
-        if cand in names_in_folder:
-            return join(cand)
-    # truncated sidecar name: exactly one media name starts with it
-    stem = os.path.splitext(base)[0] if "." in base else base
-    if len(base) >= 20:
-        pref = [n for n in names_in_folder if n.startswith(base) or n.startswith(stem)]
+    if counter:
+        stem, ext = os.path.splitext(title)
+        if f"{stem}({counter}){ext}" in names_in_folder:
+            return join(f"{stem}({counter}){ext}")
+        candidates = [n for n in names_in_folder if f"({counter})" in n]
+    else:
+        if title in names_in_folder:
+            return join(title)
+        candidates = list(names_in_folder)
+    # a title an older export cut short: exactly one media name starts with it
+    stem = os.path.splitext(title)[0] if "." in title else title
+    if len(title) >= 20:
+        pref = [n for n in candidates if n.startswith(title) or n.startswith(stem)]
         if len(pref) == 1:
             return join(pref[0])
     return ""

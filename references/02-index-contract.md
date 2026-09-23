@@ -124,13 +124,16 @@ With a card set, a full-loop render writes the loop alone to the same name with 
 
 ## `changes.log`
 
-Append-only, one line per operation, written by the apply tool:
+Append-only, one line per operation, written by the apply tool, plus a line from the handoff stage each time it lays the set down from the index:
 
 ```
 <ISO timestamp>  add     <filename>  type=<type> [companion=<name>]  <w>x<h> [<dur>s <codec>]  date=<date>/<precision>  [exif=<raw>]  [from cut-list (<reason>): <source path>]
 <ISO timestamp>  remove  <filename>  -> handoff/_removed/, cut-list.csv reason=<swapped|removed|redated>
 <ISO timestamp>  cut     <filename>  leaves cut-list.csv (now in the set)
+<ISO timestamp>  handoff media.csv laid down from index/selection.csv: <N> files[; the <M> change(s) above since the last handoff are discarded]
 ```
+
+The apply tool changes `handoff/` alone, so the lines after the last `handoff` line are changes `index/selection.csv` does not know about. The handoff stage refuses to run while there are any (every line counts in a log from before 0.4.1, which has no `handoff` line), since rebuilding `media.csv` from the index would undo them; `--discard-changes` rebuilds anyway, and its `handoff` line names how many it discarded.
 
 ## `replacements.csv`, the review round's return trip
 

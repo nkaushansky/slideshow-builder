@@ -18,7 +18,7 @@ python curate/run.py list
 | `identify` | `items.csv`, `[family] names`, the models | `index/people.csv` | `--tags-only` (people tags against the family names, no models), `--force`, `--all` (include parked files), `--limit N` |
 | `select` | `items.csv`, `people.csv`, `flags.csv`, the config (`[family] gate`; the `[show]` scope and `loop_minutes_target`; `[selection]` with its `weights`, `featured` and `cap_overrides` tables; the `[taste]` type switches and `mixed_tiles`; `[show] off_limits` and `must_include`; `[pins]`) | `index/selection.csv`, `index/cut-list.csv` | `--lens v1..v4`, `--include-undated`, `--allow-presence-gate` |
 | `sheets` | the above | `index/sheets/*.jpg`, `index/sheets/index.md`, `index/sheets/contact-sheets.pdf` | `--with-drops`, `--featured`, `--alternates <year>`, `--replacements <flags.txt>`, `--pdf` |
-| `handoff` | the above | `handoff/media/`, `media.csv`, `features.txt`, `cut-list.csv`, `inventory.md`, `HANDOFF.md`, `changes.log`, `show.json` | |
+| `handoff` | the above | `handoff/media/`, `media.csv`, `features.txt`, `cut-list.csv`, `inventory.md`, `HANDOFF.md`, `changes.log` (a `handoff` line each time), `show.json`; refuses while `changes.log` holds apply-tool changes since the last handoff | `--discard-changes` |
 | `show` | `[output]`, `[taste]`, `[show]`, `[audio]`, `[selection]`, `[machines]` in the config | `handoff/show.json` alone, after a config change | |
 
 The project folder is found from `--project`, from `SLIDESHOW_PROJECT`, or by walking up from the current directory to a `config.toml`. `python curate/common.py` prints what a config resolves to, the derived show settings and the cap plan included. Every stage prints its counts and the accounting line; a stage whose accounting does not balance writes nothing and exits non-zero.
@@ -38,7 +38,8 @@ curate/
   common.py            config loader, project paths, per-year caps and the cap plan, age labels, anchors, pins, priors, media_id,
                        the show settings and show.json writer, the off-limits resolver, the config patcher
   config.example.toml  copy to <project>/config.toml; the intake fills it
-  requirements.txt     pinned dependencies (installed by setup.py into .venv)
+  requirements.txt     the pinned core every stage needs (installed by setup.py into .venv)
+  requirements-detection.txt  OpenCV and onnxruntime for identify's detection run; optional, since some Macs have no build
   setup.py             creates the environment, installs, fetches models, reports versions
   run.py               runs one stage
   heic.py              HEIC/JPEG dimensions and conversion, used by the build side where sips is absent

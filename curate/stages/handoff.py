@@ -1,15 +1,22 @@
 """handoff: freeze the approved set as the index contract the build reads.
 
-    python curate/run.py handoff [--project P] [--dry-run] [--force]
+    python curate/run.py handoff [--project P] [--dry-run] [--force] [--discard-changes]
 
 Copies every selected file (and its Live Photo companion) from work/ into handoff/media/
 byte-identical, verified by size and SHA-256 against media_id, and writes media.csv,
 features.txt, cut-list.csv, inventory.md and HANDOFF.md in the formats of
 references/02-index-contract.md, then show.json (the display, taste and off-limits settings the
-build reads; `python curate/run.py show` writes it alone). Creates an empty changes.log when
-there is none and never truncates an existing one. Prints the accounting invariant and exits
+build reads; `python curate/run.py show` writes it alone). Prints the accounting invariant and exits
 non-zero if it does not balance: rows in media.csv + rows in cut-list.csv = files in the index,
 every file exactly once.
+
+changes.log is never truncated. Each handoff appends a `handoff` line to it when it lays the set
+down. The apply tools (add-item, apply-replacements, redate) change handoff/ alone, so index/
+never learns of their add, remove, cut and pair lines, and a handoff after them would rebuild
+media.csv from index/selection.csv and silently undo the owner's round. While the log holds such
+lines after its last `handoff` line (or any line at all, in a log from before 0.4.1), this stage
+refuses and says what to do instead; --discard-changes rebuilds anyway, and the line it appends
+says how many changes were discarded.
 
 With `[taste] live_photos = "still"` select cuts every Live Photo clip (reason excluded-type) and
 the still is written to media.csv as `type = still` with no companion; the companion symmetry
@@ -25,10 +32,46 @@ import json
 import os
 import shutil
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import SHOW_JSON_NAME, media_id, project, say, write_atomic, write_show_json  # noqa: E402
 from stages._lenses import CUT_COLS, MEDIA_COLS, STILL_TYPES, fnum, inum, read_csv, write_csv  # noqa: E402
+
+LEDGER_VERB = "handoff"      # the changes.log line this stage appends each time it lays the set down from the index
+
+
+def _verb(line: str) -> str:
+    """The operation a changes.log line records: the word after its timestamp (add, remove, cut, pair or handoff)."""
+    parts = line.split(None, 2)
+    return parts[1] if len(parts) > 1 else ""
+
+
+def unreplayed_changes(log_path: Path) -> list[str]:
+    """The changes.log lines written since the set was last laid down from index/: whatever follows the last `handoff`
+    line, or every line of a log from before 0.4.1, which has none. index/ never sees these changes."""
+    if not log_path.is_file():
+        return []
+    lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    marks = [i for i, ln in enumerate(lines) if _verb(ln) == LEDGER_VERB]
+    return lines[marks[-1] + 1:] if marks else lines
+
+
+def refuse_over_changes(pending: list[str]) -> int:
+    """Say why a handoff now would undo the owner's changes, and what to do instead; the exit status."""
+    say(f"handoff: handoff/changes.log holds {len(pending)} change(s) made after the set was last laid down from the index:")
+    for ln in pending[-6:]:
+        say(f"    {ln}")
+    if len(pending) > 6:
+        say(f"    ... and {len(pending) - 6} earlier")
+    say("  add-item, apply-replacements and redate change handoff/ alone, so index/selection.csv does not know about these,")
+    say("  and a handoff now would rebuild media.csv without them and silently undo them. Nothing was written.")
+    say("  - A config change only (display, taste, cards, music): run `python curate/run.py show`; the set stays as it is.")
+    say("  - To rebuild the set from the selection and drop those changes: `python curate/run.py handoff --discard-changes`;")
+    say("    changes.log records the discard.")
+    say("  - To keep them through a new selection: list the files that came in under [pins] files and the ones that left")
+    say("    under [show] off_limits, run select, then handoff --discard-changes.")
+    return 1
 
 
 def _human(n: int) -> str:
@@ -51,6 +94,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--project")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="re-hash every file in handoff/media even if it was verified before")
+    ap.add_argument("--discard-changes", action="store_true",
+                    help="rebuild the set from index/selection.csv although changes.log holds apply-tool changes made since "
+                         "the last handoff: they are undone, and the log says so")
     a = ap.parse_args(argv)
     P = project()
 
@@ -65,6 +111,11 @@ def main(argv: list[str]) -> int:
         if not (P.index / need).is_file():
             say(f"handoff: {P.index / need} missing; run the earlier stages first")
             return 2
+    # the owner's live-player round lives in handoff/ alone: never rebuild over it without being told to
+    log = P.handoff / "changes.log"
+    pending = unreplayed_changes(log)
+    if pending and not a.discard_changes:
+        return refuse_over_changes(pending)
     items = read_csv(P.index / "items.csv")
     byname = {r["filename"]: r for r in items}
     selection = read_csv(P.index / "selection.csv")
@@ -172,7 +223,8 @@ def main(argv: list[str]) -> int:
             f"([taste] live_photos = \"still\"; their clips are cut-list rows)")
     if a.dry_run:
         say(f"handoff: dry run; would copy {len(to_copy)} file(s) and write media.csv ({n_media} rows), features.txt "
-            f"({len(featured)} lines), cut-list.csv ({n_cut} rows), inventory.md, HANDOFF.md, {SHOW_JSON_NAME} into {P.handoff}")
+            f"({len(featured)} lines), cut-list.csv ({n_cut} rows), inventory.md, HANDOFF.md, {SHOW_JSON_NAME} into {P.handoff}, "
+            f"and append a handoff line to changes.log" + (f" discarding the {len(pending)} change(s) above it" if pending else ""))
         return 0
 
     P.media.mkdir(parents=True, exist_ok=True)
@@ -227,9 +279,11 @@ def main(argv: list[str]) -> int:
     write_csv(P.handoff / "media.csv", media_rows, MEDIA_COLS)
     write_atomic(P.handoff / "features.txt", "".join(it["filename"] + "\n" for it in sorted(featured, key=lambda r: r["filename"])))
     write_csv(P.handoff / "cut-list.csv", cuts, CUT_COLS)
-    log = P.handoff / "changes.log"
-    if not log.exists():
-        log.write_text("", encoding="utf-8")
+    # the ledger's mark: the set now stands as the index says; later apply-tool lines are what a new handoff must not undo
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    discarded = f"; the {len(pending)} change(s) above since the last handoff are discarded" if pending else ""
+    with open(log, "a", encoding="utf-8", newline="\n") as f:
+        f.write(f"{stamp}  {LEDGER_VERB:<8}media.csv laid down from index/selection.csv: {n_media} files{discarded}\n")
 
     # ---- inventory.md
     years = collections.Counter(r["date"][:4] or "undated" for r in media_rows)
@@ -279,7 +333,10 @@ def main(argv: list[str]) -> int:
          f"- `media.csv` carries one row per file with the columns of the index contract; `features.txt` lists the "
          f"{len(featured)} featured stills; `cut-list.csv` carries the {len(cuts)} files considered and not kept, with one-word reasons.",
          f"- The accounting invariant balances: {len(media_rows)} + {len(cuts)} = {len(items)} indexed files.",
-         f"- `changes.log` is {'present and untouched' if log.stat().st_size else 'empty'}; every change from here on goes through the apply tool.",
+         f"- `changes.log` ends with this handoff's line"
+         + (f", which records that the {len(pending)} apply-tool change(s) made since the last handoff were discarded" if pending else "")
+         + ". Every change from here on goes through the apply tool, and a new handoff refuses to run over such changes "
+           "unless it is told to discard them (`--discard-changes`).",
          f"- `{SHOW_JSON_NAME}` carries the display, taste, music, selection and off-limits settings the build reads: "
          f"{show['output']['width']}x{show['output']['height']} at {show['output']['fps']} fps, {show['taste']['tile_size']} tiles, "
          f"order {show['taste']['order']}, Live Photos as {show['taste']['live_photos']}, "
@@ -327,7 +384,8 @@ def main(argv: list[str]) -> int:
 
     say(f"handoff: media.csv {len(media_rows)} rows ({dict(sorted(types.items()))}), features.txt {len(featured)}, "
         f"cut-list.csv {len(cuts)} ({dict(sorted(reasons.items()))})")
-    say(f"handoff: wrote inventory.md, HANDOFF.md and {SHOW_JSON_NAME}; changes.log {'kept' if log.stat().st_size else 'ready (empty)'}; folder {P.handoff}")
+    say(f"handoff: wrote inventory.md, HANDOFF.md and {SHOW_JSON_NAME}; changes.log: handoff line appended"
+        + (f", {len(pending)} earlier change(s) discarded" if pending else "") + f"; folder {P.handoff}")
     return 0
 
 

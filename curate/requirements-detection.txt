@@ -1,0 +1,7 @@
+# Person and face detection for `python curate/run.py identify` (the plain run; `identify --tags-only` needs neither).
+# Optional: setup installs these after the core and carries on without them where the machine has no build of them.
+# At these pins that is every Intel Mac (onnxruntime's last Intel Mac build was 1.23.2) and macOS before 14 (OpenCV
+# needs 14 on Intel and 13 on Apple Silicon, onnxruntime 14). Without them every stage still runs and the family gate
+# still works from the export's people tags; the "people" gate and the person numbers need the detection run.
+opencv-python-headless==5.0.0.93
+onnxruntime==1.29.0

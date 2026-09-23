@@ -3,8 +3,10 @@ ffprobe for videos, first-frame hashing, GPS.
 
 Methods, so the numbers in items.csv are reproducible:
 - phash: imagehash.phash(hash_size=16) on the RGB image after EXIF orientation, 256 bits, hex.
-- sharpness: variance of the Laplacian (cv2.CV_64F) of a grayscale copy downscaled so the long side
-  is at most 1024 px. Bigger source images therefore compare on equal footing.
+- sharpness: variance of the Laplacian of a grayscale copy downscaled so the long side is at most
+  1024 px, so bigger source images compare on equal footing. The Laplacian is OpenCV's (3x3 kernel,
+  border reflected without repeating the edge) computed in numpy, so the index needs no OpenCV and the
+  numbers are the ones cv2.Laplacian(gray, cv2.CV_64F).var() gave.
 - width/height: displayed dimensions, i.e. stored size swapped when EXIF orientation is 5-8, and
   video stored size swapped when the rotation (display matrix or rotate tag) is +-90 or 270.
 - hdr: color_transfer smpte2084 or arib-std-b67, or a 10-bit pix_fmt (contains "10").
@@ -24,7 +26,6 @@ from zoneinfo import ZoneInfo
 
 warnings.filterwarnings("ignore")
 import numpy as np
-import cv2
 from PIL import Image, ImageFile, ImageOps
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -169,7 +170,15 @@ def sharpness(img: Image.Image) -> float:
     if ls > SHARPNESS_LONG_SIDE:
         s = SHARPNESS_LONG_SIDE / ls
         g = g.resize((max(1, int(g.width * s)), max(1, int(g.height * s))))
-    return round(float(cv2.Laplacian(np.asarray(g, dtype=np.float64), cv2.CV_64F).var()), 2)
+    return round(laplacian_variance(np.asarray(g, dtype=np.float64)), 2)
+
+
+def laplacian_variance(gray: np.ndarray) -> float:
+    """Variance of the Laplacian of a 2-D float array, as cv2.Laplacian(gray, cv2.CV_64F).var() computes it: the kernel
+    [[0, 1, 0], [1, -4, 1], [0, 1, 0]] with OpenCV's default border (BORDER_REFLECT_101, numpy's "reflect")."""
+    p = np.pad(gray, 1, mode="reflect")
+    lap = p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:] - 4.0 * p[1:-1, 1:-1]
+    return float(lap.var())
 
 
 def phash_bytes(data: bytes) -> str | None:
@@ -345,8 +354,8 @@ def best_frame_distance(still_path: str, video_path: str, ffmpeg: str, fps: floa
                 pat = os.path.join(td, "f%03d.png")
                 cmd = [ffmpeg, "-v", "error", "-y", "-i", video_path, "-vf", f"fps={fps}", "-frames:v", str(max_frames), pat]
                 out = subprocess.run(cmd, capture_output=True, timeout=300)
-                if out.returncode != 0:
-                    return None, 0
+                if out.returncode != 0:     # a clip ffprobe reads but ffmpeg cannot decode (cut short, half synced)
+                    return None, 0, None
                 for name in sorted(os.listdir(td)):
                     with Image.open(os.path.join(td, name)) as b:
                         b = b.convert("RGB")
